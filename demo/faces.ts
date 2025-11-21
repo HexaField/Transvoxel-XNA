@@ -452,6 +452,7 @@ class FacePreview {
   private readonly controls: OrbitControls;
   private readonly extent = BLOCK_WIDTH * (1 << TRANSITION_LOD_INDEX);
   private readonly previewCenter = new Vector3(0, 0, 0);
+  private helperExtent = this.extent;
   private normalHelper: LineSegments | null = null;
   private invertedHelper: LineSegments | null = null;
 
@@ -466,6 +467,7 @@ class FacePreview {
       meshData,
       color
     );
+    this.helperExtent = Math.max(radius * 2.2, this.extent * 0.5);
     this.normalHelper = normalHelper;
     this.normalHelper.visible = true;
     this.normalHelper.position.copy(this.previewCenter);
@@ -561,10 +563,18 @@ class FacePreview {
   }
 
   private configureHelpers(): void {
-    const box = new Box3(
-      new Vector3(0, 0, 0),
-      new Vector3(this.extent, this.extent, this.extent)
+    const halfExtent = this.helperExtent * 0.5;
+    const min = new Vector3(
+      this.previewCenter.x - halfExtent,
+      this.previewCenter.y - halfExtent,
+      this.previewCenter.z - halfExtent
     );
+    const max = new Vector3(
+      this.previewCenter.x + halfExtent,
+      this.previewCenter.y + halfExtent,
+      this.previewCenter.z + halfExtent
+    );
+    const box = new Box3(min, max);
     const boxHelper = new Box3Helper(box, 0x4a537a);
     this.scene.add(boxHelper);
     const boxMaterial = getSingleMaterial(boxHelper.material);
@@ -573,7 +583,7 @@ class FacePreview {
       boxMaterial.transparent = true;
     }
 
-    const axes = new AxesHelper(this.extent * 0.55);
+    const axes = new AxesHelper(this.helperExtent * 0.55);
     axes.position.copy(this.previewCenter);
     const axesMaterial = getSingleMaterial(axes.material);
     if (axesMaterial) {
