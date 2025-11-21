@@ -11,11 +11,18 @@ import {
 } from "three";
 import type { Vector3 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { TransvoxelExtractor, TransvoxelMesher, type TransitionFace } from "../src/surface-extractor/transvoxel-extractor";
+import {
+  TransvoxelExtractor,
+  TransvoxelMesher,
+  type TransitionFace,
+} from "../src/surface-extractor/transvoxel-extractor";
 import { Vector3i } from "../src/math/vector3i";
 import { Vector3f } from "../src/math/vector3f";
 import { meshDataToGeometry } from "./mesh-utils";
-import { createChunkFieldSampler, type DensityFunction } from "../src/volume/volume-data";
+import {
+  createChunkFieldSampler,
+  type DensityFunction,
+} from "../src/volume/volume-data";
 
 const mount = document.querySelector<HTMLDivElement>("#app");
 if (!mount) {
@@ -28,7 +35,12 @@ const scene = new Scene();
 scene.background = new Color("#03050c");
 scene.fog = new FogExp2("#03050c", 0.0012);
 
-const camera = new PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1500);
+const camera = new PerspectiveCamera(
+  60,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  1500
+);
 camera.position.set(60, 34, 60);
 
 const renderer = new WebGLRenderer({ antialias: true });
@@ -56,6 +68,79 @@ const BLOCK_WIDTH = TransvoxelExtractor.BlockWidth;
 const CELL_SIZE = 1;
 const CHUNK_ORIGIN_Y = 0;
 
+interface LodLevel {
+  lodIndex: number;
+  color: number;
+  maxDistance: number;
+}
+
+const LOD_LEVELS: LodLevel[] = [
+  { lodIndex: 0, color: 0xff0000, maxDistance: 48 }, // red - fine detail
+  { lodIndex: 1, color: 0x00ff00, maxDistance: 120 }, // green - medium detail
+  { lodIndex: 2, color: 0x6666ff, maxDistance: 260 }, // blue - coarse detail
+];
+
+const MAX_LOD_INDEX = LOD_LEVELS[LOD_LEVELS.length - 1].lodIndex;
+const LOD_LOOKUP = new Map(LOD_LEVELS.map((level) => [level.lodIndex, level]));
+
+const chunkWorldSize = (lodIndex: number): number =>
+  CELL_SIZE * (BLOCK_WIDTH << lodIndex);
+const chunkDiagonalRadius = (lodIndex: number): number =>
+  (chunkWorldSize(lodIndex) * Math.SQRT2) / 2;
+const chunkKey = (lodIndex: number, chunkX: number, chunkZ: number): string =>
+  `${lodIndex}:${chunkX}:${chunkZ}`;
+
+const lerp01 = (a: number, b: number, t: number): number => a + (b - a) * t;
+const smoothstep01 = (t: number): number => t * t * (3 - 2 * t);
+
+const hash2dNoise = (x: number, z: number): number => {
+  const s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453;
+  return s - Math.floor(s);
+};
+
+const valueNoise2d = (x: number, z: number): number => {
+  const xi = Math.floor(x);
+  const zi = Math.floor(z);
+  const xf = x - xi;
+  const zf = z - zi;
+
+  const v00 = hash2dNoise(xi, zi);
+  const v10 = hash2dNoise(xi + 1, zi);
+  const v01 = hash2dNoise(xi, zi + 1);
+  const v11 = hash2dNoise(xi + 1, zi + 1);
+
+  const u = smoothstep01(xf);
+  const v = smoothstep01(zf);
+
+  const top = lerp01(v00, v10, u);
+  const bottom = lerp01(v01, v11, u);
+  return lerp01(top, bottom, v);
+};
+
+const fbm2d = (x: number, z: number): number => {
+  let value = 0;
+  let amplitude = 1;
+  let frequency = 1;
+  for (let i = 0; i < 4; i++) {
+    value += amplitude * valueNoise2d(x * frequency, z * frequency);
+    amplitude *= 0.5;
+    frequency *= 2.0;
+  }
+  return value;
+};
+
+const ridgeNoise2d = (x: number, z: number): number => {
+  const n = valueNoise2d(x, z);
+  return 1 - Math.abs(2 * n - 1);
+};
+
+const terrainHeightEstimate = (x: number, z: number): number => {
+  const hills = fbm2d(x * 0.04, z * 0.04) * 28;
+  const ridges = ridgeNoise2d(x * 0.02, z * 0.02) * 16;
+  const dunes = Math.sin(x * 0.01) * 3 + Math.cos(z * 0.012) * 3;
+  return 8 + hills + ridges + dunes;
+};
+
 type ChunkWorkerRequest = {
   key: string;
   lodIndex: number;
@@ -78,6 +163,11 @@ interface ChunkRecord {
   material: MeshStandardMaterial;
   key: string;
   transitionHash: string;
+  lodIndex: number;
+  chunkX: number;
+  chunkZ: number;
+  color: number;
+  originY: number;
 }
 
 interface ChunkDescriptor {
@@ -87,13 +177,14 @@ interface ChunkDescriptor {
   key: string;
   color: number;
   transitionFaces: TransitionFace[];
+  originY: number;
 }
 
-const lodBands = [
-  { lodIndex: 0, radius: 1, color: 0x8ed081 },
-  { lodIndex: 1, radius: 2, color: 0x6b9d60 },
-  { lodIndex: 2, radius: 3, color: 0x4a6c3d },
-];
+interface QuadNode {
+  lodIndex: number;
+  chunkX: number;
+  chunkZ: number;
+}
 
 interface CoverageCell {
   ownerKey: string;
@@ -106,14 +197,19 @@ class ChunkManager {
   private readonly chunks = new Map<string, ChunkRecord>();
   private readonly pending = new Map<string, ChunkDescriptor>();
   private readonly lastDesiredDescriptors = new Map<string, string>();
+  private lastCameraPosition: { x: number; z: number } | null = null;
 
-  constructor(private readonly root: Scene, private readonly statsTarget: HTMLParagraphElement | null) {
+  constructor(
+    private readonly root: Scene,
+    private readonly statsTarget: HTMLParagraphElement | null
+  ) {
     this.worker.onmessage = (event: MessageEvent<ChunkWorkerResponse>) => {
       this.handleWorkerMessage(event.data as ChunkWorkerResponse);
     };
   }
 
   update(cameraPosition: Vector3): void {
+    this.lastCameraPosition = { x: cameraPosition.x, z: cameraPosition.z };
     const desired = this.collectDesiredChunks(cameraPosition);
     if (this.hasDesiredChanged(desired)) {
       this.reconcileChunks(desired);
@@ -122,61 +218,154 @@ class ChunkManager {
     this.updateStats();
   }
 
-  private collectDesiredChunks(cameraPosition: Vector3): Map<string, ChunkDescriptor> {
+  private collectDesiredChunks(
+    cameraPosition: Vector3
+  ): Map<string, ChunkDescriptor> {
     const desired = new Map<string, ChunkDescriptor>();
     const coverage = new Map<string, CoverageCell>();
-    for (const band of lodBands) {
-      const chunkSize = BLOCK_WIDTH << band.lodIndex;
-      const baseX = Math.floor(cameraPosition.x / chunkSize);
-      const baseZ = Math.floor(cameraPosition.z / chunkSize);
+    const queue = this.buildInitialNodes(cameraPosition);
 
-      for (let dx = -band.radius; dx <= band.radius; dx++) {
-        for (let dz = -band.radius; dz <= band.radius; dz++) {
-          if (Math.hypot(dx, dz) > band.radius + 0.2) {
-            continue;
-          }
-
-          const chunkX = baseX + dx;
-          const chunkZ = baseZ + dz;
-          const key = `${band.lodIndex}:${chunkX}:${chunkZ}`;
-          if (this.intersectsHigherDetailCoverage(coverage, chunkX, chunkZ, band.lodIndex)) {
-            continue;
-          }
-          desired.set(key, {
-            lodIndex: band.lodIndex,
-            chunkX,
-            chunkZ,
-            key,
-            color: band.color,
-            transitionFaces: [],
-          });
-          this.markCoverage(coverage, chunkX, chunkZ, band.lodIndex, key);
-        }
+    while (queue.length) {
+      const node = queue.pop()!;
+      const level = LOD_LOOKUP.get(node.lodIndex);
+      if (!level) {
+        continue;
       }
+
+      const center = this.chunkCenter(node);
+      const distance = Math.hypot(
+        center.x - cameraPosition.x,
+        center.z - cameraPosition.z
+      );
+      const radius = chunkDiagonalRadius(node.lodIndex);
+
+      if (distance - radius > level.maxDistance) {
+        continue;
+      }
+
+      if (this.shouldSubdivide(node, distance, radius)) {
+        this.subdivideNode(node).forEach((child) => queue.push(child));
+        continue;
+      }
+
+      const key = chunkKey(node.lodIndex, node.chunkX, node.chunkZ);
+      desired.set(key, {
+        lodIndex: node.lodIndex,
+        chunkX: node.chunkX,
+        chunkZ: node.chunkZ,
+        key,
+        color: level.color,
+        transitionFaces: [],
+        originY: this.estimateOriginY(node.lodIndex, node.chunkX, node.chunkZ),
+      });
+      this.markCoverage(coverage, node.chunkX, node.chunkZ, node.lodIndex, key);
     }
 
     this.assignTransitionFaces(desired, coverage);
     return desired;
   }
 
-  private intersectsHigherDetailCoverage(
-    coverage: Map<string, CoverageCell>,
-    chunkX: number,
-    chunkZ: number,
-    lodIndex: number
-  ): boolean {
-    const scale = 1 << lodIndex;
-    const startX = chunkX * scale;
-    const startZ = chunkZ * scale;
-    for (let x = 0; x < scale; x++) {
-      for (let z = 0; z < scale; z++) {
-        const key = this.baseCoverageKey(startX + x, startZ + z);
-        if (coverage.has(key)) {
-          return true;
-        }
+  private buildInitialNodes(cameraPosition: Vector3): QuadNode[] {
+    const nodes: QuadNode[] = [];
+    const coarseSize = chunkWorldSize(MAX_LOD_INDEX);
+    const radiusChunks =
+      Math.ceil(LOD_LEVELS[LOD_LEVELS.length - 1].maxDistance / coarseSize) + 2;
+    const baseX = Math.floor(cameraPosition.x / coarseSize);
+    const baseZ = Math.floor(cameraPosition.z / coarseSize);
+
+    for (let dx = -radiusChunks; dx <= radiusChunks; dx++) {
+      for (let dz = -radiusChunks; dz <= radiusChunks; dz++) {
+        nodes.push({
+          lodIndex: MAX_LOD_INDEX,
+          chunkX: baseX + dx,
+          chunkZ: baseZ + dz,
+        });
       }
     }
-    return false;
+
+    return nodes;
+  }
+
+  private shouldSubdivide(
+    node: QuadNode,
+    distance: number,
+    radius: number
+  ): boolean {
+    if (node.lodIndex === 0) {
+      return false;
+    }
+
+    const childLevel = LOD_LOOKUP.get(node.lodIndex - 1);
+    if (!childLevel) {
+      return false;
+    }
+
+    return distance - radius < childLevel.maxDistance;
+  }
+
+  private subdivideNode(node: QuadNode): QuadNode[] {
+    const childLod = node.lodIndex - 1;
+    const baseX = node.chunkX * 2;
+    const baseZ = node.chunkZ * 2;
+    return [
+      { lodIndex: childLod, chunkX: baseX, chunkZ: baseZ },
+      { lodIndex: childLod, chunkX: baseX + 1, chunkZ: baseZ },
+      { lodIndex: childLod, chunkX: baseX, chunkZ: baseZ + 1 },
+      { lodIndex: childLod, chunkX: baseX + 1, chunkZ: baseZ + 1 },
+    ];
+  }
+
+  private chunkCenter(node: QuadNode): { x: number; z: number } {
+    const size = chunkWorldSize(node.lodIndex);
+    return {
+      x: (node.chunkX + 0.5) * size,
+      z: (node.chunkZ + 0.5) * size,
+    };
+  }
+
+  private estimateOriginY(
+    lodIndex: number,
+    chunkX: number,
+    chunkZ: number
+  ): number {
+    const size = chunkWorldSize(lodIndex);
+    const minX = chunkX * size;
+    const minZ = chunkZ * size;
+    const samplePoints: Array<{ x: number; z: number }> = [
+      { x: minX, z: minZ },
+      { x: minX + size, z: minZ },
+      { x: minX, z: minZ + size },
+      { x: minX + size, z: minZ + size },
+      { x: minX + size * 0.5, z: minZ + size * 0.5 },
+    ];
+
+    let minHeight = Infinity;
+    let maxHeight = -Infinity;
+    for (const point of samplePoints) {
+      const height = terrainHeightEstimate(point.x, point.z);
+      if (height < minHeight) {
+        minHeight = height;
+      }
+      if (height > maxHeight) {
+        maxHeight = height;
+      }
+    }
+
+    if (!Number.isFinite(minHeight) || !Number.isFinite(maxHeight)) {
+      return CHUNK_ORIGIN_Y;
+    }
+
+    const margin = Math.min(size * 0.25, 12);
+    const desiredMin = minHeight - margin;
+    const desiredMax = maxHeight + margin;
+    const span = desiredMax - desiredMin;
+
+    if (span <= size) {
+      return Math.floor(desiredMin);
+    }
+
+    const shift = (span - size) * 0.5;
+    return Math.floor(desiredMin + shift);
   }
 
   private markCoverage(
@@ -265,7 +454,22 @@ class ChunkManager {
   private reconcileChunks(desired: Map<string, ChunkDescriptor>): void {
     for (const existingKey of Array.from(this.chunks.keys())) {
       if (!desired.has(existingKey)) {
-        this.disposeChunk(existingKey);
+        const record = this.chunks.get(existingKey);
+        if (!record) {
+          continue;
+        }
+
+        const replacement = this.findOverlappingDescriptor(record, desired);
+        if (replacement) {
+          if (replacement.lodIndex !== record.lodIndex) {
+            this.disposeChunk(existingKey);
+          }
+          continue;
+        }
+
+        if (this.shouldCullChunk(record)) {
+          this.disposeChunk(existingKey);
+        }
       }
     }
 
@@ -288,9 +492,14 @@ class ChunkManager {
 
       const pendingDescriptor = this.pending.get(descriptor.key);
       if (pendingDescriptor) {
-        const pendingHash = this.transitionSignature(pendingDescriptor.transitionFaces);
+        const pendingHash = this.transitionSignature(
+          pendingDescriptor.transitionFaces
+        );
         if (pendingHash !== desiredHash) {
-          this.pending.set(descriptor.key, { ...descriptor, transitionFaces: [...descriptor.transitionFaces] });
+          this.pending.set(descriptor.key, {
+            ...descriptor,
+            transitionFaces: [...descriptor.transitionFaces],
+          });
         }
         continue;
       }
@@ -313,21 +522,29 @@ class ChunkManager {
     return false;
   }
 
-  private captureDesiredDescriptors(desired: Map<string, ChunkDescriptor>): void {
+  private captureDesiredDescriptors(
+    desired: Map<string, ChunkDescriptor>
+  ): void {
     this.lastDesiredDescriptors.clear();
     for (const [key, descriptor] of desired.entries()) {
-      this.lastDesiredDescriptors.set(key, this.transitionSignature(descriptor.transitionFaces));
+      this.lastDesiredDescriptors.set(
+        key,
+        this.transitionSignature(descriptor.transitionFaces)
+      );
     }
   }
 
   private requestChunk(descriptor: ChunkDescriptor): void {
-    this.pending.set(descriptor.key, { ...descriptor, transitionFaces: [...descriptor.transitionFaces] });
+    this.pending.set(descriptor.key, {
+      ...descriptor,
+      transitionFaces: [...descriptor.transitionFaces],
+    });
     const request: ChunkWorkerRequest = {
       key: descriptor.key,
       lodIndex: descriptor.lodIndex,
       chunkX: descriptor.chunkX,
       chunkZ: descriptor.chunkZ,
-      originY: CHUNK_ORIGIN_Y,
+      originY: descriptor.originY,
     };
     this.worker.postMessage(request);
   }
@@ -352,12 +569,15 @@ class ChunkManager {
     this.buildChunk(descriptor, sampler);
   }
 
-  private buildChunk(descriptor: ChunkDescriptor, sampler: DensityFunction): void {
+  private buildChunk(
+    descriptor: ChunkDescriptor,
+    sampler: DensityFunction
+  ): void {
     const cellScale = 1 << descriptor.lodIndex;
     const samplesPerAxis = BLOCK_WIDTH * cellScale;
     const origin = new Vector3i(
       descriptor.chunkX * samplesPerAxis,
-      CHUNK_ORIGIN_Y,
+      descriptor.originY,
       descriptor.chunkZ * samplesPerAxis
     );
 
@@ -390,6 +610,11 @@ class ChunkManager {
       material,
       key: descriptor.key,
       transitionHash: this.transitionSignature(descriptor.transitionFaces),
+      lodIndex: descriptor.lodIndex,
+      chunkX: descriptor.chunkX,
+      chunkZ: descriptor.chunkZ,
+      color: descriptor.color,
+      originY: descriptor.originY,
     });
   }
 
@@ -409,6 +634,79 @@ class ChunkManager {
     if (this.statsTarget) {
       this.statsTarget.textContent = `${this.chunks.size} active chunks (${this.pending.size} building)`;
     }
+  }
+
+  private findOverlappingDescriptor(
+    record: ChunkRecord,
+    desired: Map<string, ChunkDescriptor>
+  ): ChunkDescriptor | null {
+    const bounds = this.chunkBounds(
+      record.lodIndex,
+      record.chunkX,
+      record.chunkZ
+    );
+    for (const descriptor of desired.values()) {
+      const other = this.chunkBounds(
+        descriptor.lodIndex,
+        descriptor.chunkX,
+        descriptor.chunkZ
+      );
+      if (this.boundsIntersect(bounds, other)) {
+        return descriptor;
+      }
+    }
+    return null;
+  }
+
+  private chunkBounds(
+    lodIndex: number,
+    chunkX: number,
+    chunkZ: number
+  ): {
+    minX: number;
+    maxX: number;
+    minZ: number;
+    maxZ: number;
+  } {
+    const size = chunkWorldSize(lodIndex);
+    const minX = chunkX * size;
+    const minZ = chunkZ * size;
+    return {
+      minX,
+      maxX: minX + size,
+      minZ,
+      maxZ: minZ + size,
+    };
+  }
+
+  private boundsIntersect(
+    a: { minX: number; maxX: number; minZ: number; maxZ: number },
+    b: { minX: number; maxX: number; minZ: number; maxZ: number }
+  ): boolean {
+    return !(
+      a.maxX <= b.minX ||
+      a.minX >= b.maxX ||
+      a.maxZ <= b.minZ ||
+      a.minZ >= b.maxZ
+    );
+  }
+
+  private shouldCullChunk(record: ChunkRecord): boolean {
+    if (!this.lastCameraPosition) {
+      return false;
+    }
+
+    const centerX = (record.chunkX + 0.5) * chunkWorldSize(record.lodIndex);
+    const centerZ = (record.chunkZ + 0.5) * chunkWorldSize(record.lodIndex);
+    const distance = Math.hypot(
+      centerX - this.lastCameraPosition.x,
+      centerZ - this.lastCameraPosition.z
+    );
+    const level = LOD_LOOKUP.get(record.lodIndex);
+    const maxDistance = level
+      ? level.maxDistance
+      : chunkWorldSize(record.lodIndex) * 4;
+    return distance - chunkDiagonalRadius(record.lodIndex) > maxDistance * 1.5;
   }
 
   private transitionSignature(faces: TransitionFace[]): string {
@@ -445,7 +743,7 @@ function createChunkWorker(): Worker {
     self.onmessage = (event) => {
       const { key, lodIndex, chunkX, chunkZ, originY } = event.data;
       const range = BLOCK_WIDTH << lodIndex;
-      const sampleSize = range + 2;
+      const sampleSize = range + 3;
       const minX = chunkX * range - 1;
       const minY = originY - 1;
       const minZ = chunkZ * range - 1;
