@@ -219,7 +219,7 @@ describe("TransvoxelExtractor", () => {
     );
 
     expect(afterFirstCell).toBeGreaterThan(0);
-    expect(verts.length).toBe(afterFirstCell + 3);
+    expect(verts.length).toBe(afterFirstCell + 4);
   });
 
   it("returns secondary coordinates for renderable positions", () => {

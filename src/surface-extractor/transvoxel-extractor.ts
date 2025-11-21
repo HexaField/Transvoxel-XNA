@@ -470,14 +470,23 @@ export class TransvoxelExtractor {
       if ((t & 0x00ff) !== 0) {
         const dir = hiNibble((edgeCode >> 8) & 0xff);
         const idx = loNibble((edgeCode >> 8) & 0xff);
-        let present = (dir & directionMask) === dir;
+        const axisBits = dir & 0x07;
+        let present = axisBits !== 0 && (axisBits & directionMask) === axisBits;
+        let reusedFrom = -1;
+        let prevCoords: Vector3i | null = null;
 
         if (present) {
-          const prev = cache.getCellByVector(xyz.add(prevOffset(dir)));
-          if (prev.caseIndex === 0 || prev.caseIndex === 255) {
+          prevCoords = xyz.add(prevOffset(dir));
+          const prev = cache.getCellByVector(prevCoords);
+          if (
+            prev.caseIndex === 0 ||
+            prev.caseIndex === 255 ||
+            prev.dirs[idx] !== axisBits
+          ) {
             localVertexMapping[i] = -1;
           } else {
             localVertexMapping[i] = prev.verts[idx];
+            reusedFrom = prev.verts[idx];
           }
         }
 
@@ -489,24 +498,36 @@ export class TransvoxelExtractor {
 
           if ((dir & 8) !== 0) {
             cacheCell.verts[idx] = localVertexMapping[i];
+            cacheCell.dirs[idx] = axisBits;
           }
         }
+
       } else if (t === 0 && v1 === 7) {
         const pi = toVector3f(p1).multiplyScalar(t0).add(toVector3f(p1).multiplyScalar(t1));
         const normal = computeNormal(n0, n1, t0, t1);
         const vertex = createVertex(pi, normal, near, offset, lodIndex);
         localVertexMapping[i] = verts.push(vertex) - 1;
         cacheCell.verts[0] = localVertexMapping[i];
+        cacheCell.dirs[0] = 0;
       } else {
         const dir = t === 0 ? (v1 ^ 7) : (v0 ^ 7);
-        let present = (dir & directionMask) === dir;
+        const axisBits = dir & 0x07;
+        let present = axisBits !== 0 && (axisBits & directionMask) === axisBits;
+        let reusedFrom = -1;
+        let prevCoords: Vector3i | null = null;
 
         if (present) {
-          const prev = cache.getCellByVector(xyz.add(prevOffset(dir)));
-          if (prev.caseIndex === 0 || prev.caseIndex === 255) {
+          prevCoords = xyz.add(prevOffset(dir));
+          const prev = cache.getCellByVector(prevCoords);
+          if (
+            prev.caseIndex === 0 ||
+            prev.caseIndex === 255 ||
+            prev.dirs[0] !== axisBits
+          ) {
             localVertexMapping[i] = -1;
           } else {
             localVertexMapping[i] = prev.verts[0];
+            reusedFrom = prev.verts[0];
           }
         }
 

@@ -3,10 +3,12 @@ import { Vector3i } from "../math/vector3i";
 export class RegularCacheCell {
   caseIndex = 0;
   verts = new Int32Array(4).fill(-1);
+  dirs = new Int8Array(4).fill(-1);
 
   reset(): void {
     this.caseIndex = 0;
     this.verts.fill(-1);
+    this.dirs.fill(-1);
   }
 }
 
