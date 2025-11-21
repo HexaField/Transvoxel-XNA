@@ -11,7 +11,7 @@ import {
 } from "three";
 import type { Vector3 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { TransvoxelExtractor, TransvoxelMesher } from "../src/surface-extractor/transvoxel-extractor";
+import { TransvoxelExtractor, TransvoxelMesher, type TransitionFace } from "../src/surface-extractor/transvoxel-extractor";
 import { Vector3i } from "../src/math/vector3i";
 import { Vector3f } from "../src/math/vector3f";
 import { meshDataToGeometry } from "./mesh-utils";
@@ -77,6 +77,7 @@ interface ChunkRecord {
   mesh: Mesh;
   material: MeshStandardMaterial;
   key: string;
+  transitionHash: string;
 }
 
 interface ChunkDescriptor {
@@ -85,6 +86,7 @@ interface ChunkDescriptor {
   chunkZ: number;
   key: string;
   color: number;
+  transitionFaces: TransitionFace[];
 }
 
 const lodBands = [
@@ -93,12 +95,17 @@ const lodBands = [
   { lodIndex: 2, radius: 3, color: 0x4a6c3d },
 ];
 
+interface CoverageCell {
+  ownerKey: string;
+  lodIndex: number;
+}
+
 class ChunkManager {
   private readonly mesher = new TransvoxelMesher();
   private readonly worker = createChunkWorker();
   private readonly chunks = new Map<string, ChunkRecord>();
   private readonly pending = new Map<string, ChunkDescriptor>();
-  private readonly lastDesiredKeys = new Set<string>();
+  private readonly lastDesiredDescriptors = new Map<string, string>();
 
   constructor(private readonly root: Scene, private readonly statsTarget: HTMLParagraphElement | null) {
     this.worker.onmessage = (event: MessageEvent<ChunkWorkerResponse>) => {
@@ -110,13 +117,14 @@ class ChunkManager {
     const desired = this.collectDesiredChunks(cameraPosition);
     if (this.hasDesiredChanged(desired)) {
       this.reconcileChunks(desired);
-      this.captureDesiredKeys(desired);
+      this.captureDesiredDescriptors(desired);
     }
     this.updateStats();
   }
 
   private collectDesiredChunks(cameraPosition: Vector3): Map<string, ChunkDescriptor> {
     const desired = new Map<string, ChunkDescriptor>();
+    const coverage = new Map<string, CoverageCell>();
     for (const band of lodBands) {
       const chunkSize = BLOCK_WIDTH << band.lodIndex;
       const baseX = Math.floor(cameraPosition.x / chunkSize);
@@ -131,18 +139,127 @@ class ChunkManager {
           const chunkX = baseX + dx;
           const chunkZ = baseZ + dz;
           const key = `${band.lodIndex}:${chunkX}:${chunkZ}`;
+          if (this.intersectsHigherDetailCoverage(coverage, chunkX, chunkZ, band.lodIndex)) {
+            continue;
+          }
           desired.set(key, {
             lodIndex: band.lodIndex,
             chunkX,
             chunkZ,
             key,
             color: band.color,
+            transitionFaces: [],
           });
+          this.markCoverage(coverage, chunkX, chunkZ, band.lodIndex, key);
         }
       }
     }
 
+    this.assignTransitionFaces(desired, coverage);
     return desired;
+  }
+
+  private intersectsHigherDetailCoverage(
+    coverage: Map<string, CoverageCell>,
+    chunkX: number,
+    chunkZ: number,
+    lodIndex: number
+  ): boolean {
+    const scale = 1 << lodIndex;
+    const startX = chunkX * scale;
+    const startZ = chunkZ * scale;
+    for (let x = 0; x < scale; x++) {
+      for (let z = 0; z < scale; z++) {
+        const key = this.baseCoverageKey(startX + x, startZ + z);
+        if (coverage.has(key)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private markCoverage(
+    coverage: Map<string, CoverageCell>,
+    chunkX: number,
+    chunkZ: number,
+    lodIndex: number,
+    ownerKey: string
+  ): void {
+    const scale = 1 << lodIndex;
+    const startX = chunkX * scale;
+    const startZ = chunkZ * scale;
+    for (let x = 0; x < scale; x++) {
+      for (let z = 0; z < scale; z++) {
+        const key = this.baseCoverageKey(startX + x, startZ + z);
+        coverage.set(key, { ownerKey, lodIndex });
+      }
+    }
+  }
+
+  private assignTransitionFaces(
+    desired: Map<string, ChunkDescriptor>,
+    coverage: Map<string, CoverageCell>
+  ): void {
+    for (const descriptor of desired.values()) {
+      if (descriptor.lodIndex === 0) {
+        descriptor.transitionFaces = [];
+        continue;
+      }
+
+      const faces: TransitionFace[] = [];
+      if (this.hasHigherDetailNeighbor(descriptor, coverage, "x", -1)) {
+        faces.push("negativeX");
+      }
+      if (this.hasHigherDetailNeighbor(descriptor, coverage, "x", 1)) {
+        faces.push("positiveX");
+      }
+      if (this.hasHigherDetailNeighbor(descriptor, coverage, "z", -1)) {
+        faces.push("negativeZ");
+      }
+      if (this.hasHigherDetailNeighbor(descriptor, coverage, "z", 1)) {
+        faces.push("positiveZ");
+      }
+
+      descriptor.transitionFaces = faces;
+    }
+  }
+
+  private hasHigherDetailNeighbor(
+    descriptor: ChunkDescriptor,
+    coverage: Map<string, CoverageCell>,
+    axis: "x" | "z",
+    direction: -1 | 1
+  ): boolean {
+    const scale = 1 << descriptor.lodIndex;
+    const startX = descriptor.chunkX * scale;
+    const startZ = descriptor.chunkZ * scale;
+    const endX = startX + scale - 1;
+    const endZ = startZ + scale - 1;
+
+    if (axis === "x") {
+      const neighborX = direction === -1 ? startX - 1 : endX + 1;
+      for (let z = startZ; z <= endZ; z++) {
+        const cell = coverage.get(this.baseCoverageKey(neighborX, z));
+        if (cell && cell.lodIndex < descriptor.lodIndex) {
+          return true;
+        }
+      }
+    } else {
+      const neighborZ = direction === -1 ? startZ - 1 : endZ + 1;
+      for (let x = startX; x <= endX; x++) {
+        const cell = coverage.get(this.baseCoverageKey(x, neighborZ));
+        if (cell && cell.lodIndex < descriptor.lodIndex) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private baseCoverageKey(x: number, z: number): string {
+    return `${x}:${z}`;
   }
 
   private reconcileChunks(desired: Map<string, ChunkDescriptor>): void {
@@ -159,7 +276,22 @@ class ChunkManager {
     }
 
     for (const descriptor of desired.values()) {
-      if (this.chunks.has(descriptor.key) || this.pending.has(descriptor.key)) {
+      const desiredHash = this.transitionSignature(descriptor.transitionFaces);
+      const existing = this.chunks.get(descriptor.key);
+      if (existing) {
+        if (existing.transitionHash !== desiredHash) {
+          this.disposeChunk(descriptor.key);
+        } else {
+          continue;
+        }
+      }
+
+      const pendingDescriptor = this.pending.get(descriptor.key);
+      if (pendingDescriptor) {
+        const pendingHash = this.transitionSignature(pendingDescriptor.transitionFaces);
+        if (pendingHash !== desiredHash) {
+          this.pending.set(descriptor.key, { ...descriptor, transitionFaces: [...descriptor.transitionFaces] });
+        }
         continue;
       }
       this.requestChunk(descriptor);
@@ -167,12 +299,13 @@ class ChunkManager {
   }
 
   private hasDesiredChanged(desired: Map<string, ChunkDescriptor>): boolean {
-    if (desired.size !== this.lastDesiredKeys.size) {
+    if (desired.size !== this.lastDesiredDescriptors.size) {
       return true;
     }
 
-    for (const key of desired.keys()) {
-      if (!this.lastDesiredKeys.has(key)) {
+    for (const [key, descriptor] of desired.entries()) {
+      const signature = this.transitionSignature(descriptor.transitionFaces);
+      if (this.lastDesiredDescriptors.get(key) !== signature) {
         return true;
       }
     }
@@ -180,15 +313,15 @@ class ChunkManager {
     return false;
   }
 
-  private captureDesiredKeys(desired: Map<string, ChunkDescriptor>): void {
-    this.lastDesiredKeys.clear();
-    for (const key of desired.keys()) {
-      this.lastDesiredKeys.add(key);
+  private captureDesiredDescriptors(desired: Map<string, ChunkDescriptor>): void {
+    this.lastDesiredDescriptors.clear();
+    for (const [key, descriptor] of desired.entries()) {
+      this.lastDesiredDescriptors.set(key, this.transitionSignature(descriptor.transitionFaces));
     }
   }
 
   private requestChunk(descriptor: ChunkDescriptor): void {
-    this.pending.set(descriptor.key, descriptor);
+    this.pending.set(descriptor.key, { ...descriptor, transitionFaces: [...descriptor.transitionFaces] });
     const request: ChunkWorkerRequest = {
       key: descriptor.key,
       lodIndex: descriptor.lodIndex,
@@ -222,14 +355,18 @@ class ChunkManager {
   private buildChunk(descriptor: ChunkDescriptor, sampler: DensityFunction): void {
     const cellScale = 1 << descriptor.lodIndex;
     const samplesPerAxis = BLOCK_WIDTH * cellScale;
-    const origin = new Vector3i(descriptor.chunkX * samplesPerAxis, CHUNK_ORIGIN_Y, descriptor.chunkZ * samplesPerAxis);
-    const offset = new Vector3f(origin.x * CELL_SIZE, origin.y * CELL_SIZE, origin.z * CELL_SIZE);
+    const origin = new Vector3i(
+      descriptor.chunkX * samplesPerAxis,
+      CHUNK_ORIGIN_Y,
+      descriptor.chunkZ * samplesPerAxis
+    );
 
-    const meshData = this.mesher.extractRegularBlock(sampler, {
+    const meshData = this.mesher.extractBlock(sampler, {
       origin,
-      offset,
+      offset: Vector3f.zero,
       lodIndex: descriptor.lodIndex,
       cellSize: CELL_SIZE,
+      transitionFaces: descriptor.transitionFaces,
     });
 
     if (meshData.indices.length === 0) {
@@ -248,7 +385,12 @@ class ChunkManager {
     mesh.receiveShadow = true;
 
     this.root.add(mesh);
-    this.chunks.set(descriptor.key, { mesh, material, key: descriptor.key });
+    this.chunks.set(descriptor.key, {
+      mesh,
+      material,
+      key: descriptor.key,
+      transitionHash: this.transitionSignature(descriptor.transitionFaces),
+    });
   }
 
   private disposeChunk(key: string): void {
@@ -267,6 +409,13 @@ class ChunkManager {
     if (this.statsTarget) {
       this.statsTarget.textContent = `${this.chunks.size} active chunks (${this.pending.size} building)`;
     }
+  }
+
+  private transitionSignature(faces: TransitionFace[]): string {
+    if (faces.length === 0) {
+      return "none";
+    }
+    return faces.slice().sort().join(",");
   }
 }
 
