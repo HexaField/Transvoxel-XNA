@@ -6,12 +6,19 @@
     <title>Transvoxel Transition Faces</title>
     <link rel="stylesheet" href="/style.css" />
   </head>
-  <body class="face-grid-page">
-    <div class="grid-nav">
-      <h1>Transition Face Grid</h1>
+  <body class="case-page">
+    <header class="case-header">
+      <div>
+        <h1>Transvoxel Case Explorer</h1>
+        <p>
+          Browse every regular (256) and transition (512) case the algorithm handles. Each entry shows the
+          generated mesh, its lookup-table metadata, and a quick comparison against the expected counts so you
+          can spot regressions fast.
+        </p>
+      </div>
       <a href="./index.html">← Back to interactive demo</a>
-    </div>
-    <main id="face-grid" class="face-grid" aria-live="polite"></main>
+    </header>
+    <main id="case-sections" class="case-sections" aria-live="polite"></main>
     <script type="module" src="/faces.ts"></script>
   </body>
 </html>

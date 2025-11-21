@@ -4,8 +4,10 @@ import { TransvoxelMesher, TransvoxelExtractor, TransitionFace } from "../src/su
 import { FunctionalVolume, type DensityFunction, type VolumeData } from "../src/volume/volume-data";
 import { Vector3i } from "../src/math/vector3i";
 import { Vector3f } from "../src/math/vector3f";
-import { RegularCache } from "../src/surface-extractor/cache";
+import { RegularCache, TransitionCache } from "../src/surface-extractor/cache";
 import { TransvoxelVertex, getRenderablePosition, unusedVertexPosition } from "../src/surface-extractor/vertex";
+import { Tables } from "../src/lengyel/tables";
+import { buildRegularCaseMesh, buildTransitionCaseMesh } from "./case-fixtures";
 
 const createSphereVolume = (radius = 7, center = 8) =>
   new FunctionalVolume((x, y, z) => {
@@ -230,5 +232,105 @@ describe("TransvoxelExtractor", () => {
     };
 
     expect(getRenderablePosition(vertex)).toBe(secondary);
+  });
+});
+
+describe("Reference case tables", () => {
+  const regularCache = new RegularCache(TransvoxelExtractor.BlockWidth);
+  const transitionCache = new TransitionCache(TransvoxelExtractor.BlockWidth);
+
+  it("matches every regular case entry", () => {
+    const mismatches: Array<{
+      caseCode: number;
+      classIndex: number;
+      expectedVertices: number;
+      actualVertices: number;
+      expectedTriangles: number;
+      actualTriangles: number;
+    }> = [];
+
+    for (let caseCode = 0; caseCode < 256; caseCode++) {
+      const mesh = buildRegularCaseMesh(caseCode, regularCache);
+      const actualVertices = mesh.vertices.length;
+      const actualTriangles = mesh.indices.length / 3;
+      const classIndex = Tables.RegularCellClass[caseCode];
+      const entry = Tables.RegularCellData[classIndex];
+      const expectedVertices = entry.getVertexCount();
+      const expectedTriangles = entry.getTriangleCount();
+
+      if (actualVertices !== expectedVertices || actualTriangles !== expectedTriangles) {
+        mismatches.push({
+          caseCode,
+          classIndex,
+          expectedVertices,
+          actualVertices,
+          expectedTriangles,
+          actualTriangles,
+        });
+      }
+    }
+
+    if (mismatches.length > 0) {
+      console.table(
+        mismatches.map((mismatch) => ({
+          case: `0x${mismatch.caseCode.toString(16).toUpperCase().padStart(2, "0")}`,
+          classIndex: mismatch.classIndex,
+          expected: `${mismatch.expectedVertices}/${mismatch.expectedTriangles}`,
+          actual: `${mismatch.actualVertices}/${mismatch.actualTriangles}`,
+        }))
+      );
+    }
+
+    expect(mismatches).toHaveLength(0);
+  });
+
+  it("matches every transition case entry", () => {
+    const mismatches: Array<{
+      caseCode: number;
+      classIndex: number;
+      inverted: boolean;
+      expectedVertices: number;
+      actualVertices: number;
+      expectedTriangles: number;
+      actualTriangles: number;
+    }> = [];
+
+    for (let caseCode = 0; caseCode < 512; caseCode++) {
+      const mesh = buildTransitionCaseMesh(caseCode, transitionCache);
+      const actualVertices = mesh.vertices.length;
+      const actualTriangles = mesh.indices.length / 3;
+      const rawClass = Tables.TransitionCellClass[caseCode];
+      const classIndex = rawClass & 0x7f;
+      const inverted = (rawClass & 0x80) !== 0;
+      const entry = Tables.TransitionRegularCellData[classIndex];
+      const expectedVertices = entry.getVertexCount();
+      const expectedTriangles = entry.getTriangleCount();
+
+      if (actualVertices !== expectedVertices || actualTriangles !== expectedTriangles) {
+        mismatches.push({
+          caseCode,
+          classIndex,
+          inverted,
+          expectedVertices,
+          actualVertices,
+          expectedTriangles,
+          actualTriangles,
+        });
+      }
+    }
+
+    if (mismatches.length > 0) {
+      console.table(
+        mismatches.map((mismatch) => ({
+          case: `0x${mismatch.caseCode.toString(16).toUpperCase().padStart(3, "0")}`,
+          classIndex: mismatch.classIndex,
+          inverted: mismatch.inverted,
+          expected: `${mismatch.expectedVertices}/${mismatch.expectedTriangles}`,
+          actual: `${mismatch.actualVertices}/${mismatch.actualTriangles}`,
+        }))
+      );
+    }
+
+    expect(mismatches).toHaveLength(0);
   });
 });
