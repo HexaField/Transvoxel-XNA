@@ -241,9 +241,9 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
   negativeZ: {
     axis: 2,
     direction: -1,
-    originOffset: blockVector(0, BLOCK_WIDTH, 0),
+    originOffset: blockVector(0, 0, 0),
     localX: blockVector(1, 0, 0),
-    localY: blockVector(0, -1, 0),
+    localY: blockVector(0, 1, 0),
     localZ: blockVector(0, 0, 1),
   },
   positiveZ: {
