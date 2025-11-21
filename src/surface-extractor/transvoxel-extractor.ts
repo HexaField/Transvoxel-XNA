@@ -16,6 +16,19 @@ const signBit = (value: number): number => (value >> 7) & 1;
 
 const toVector3f = (vector: Vector3i): Vector3f => new Vector3f(vector.x, vector.y, vector.z);
 
+const setAxisComponent = (vector: Vector3f, axis: number, value: number): Vector3f => {
+  switch (axis) {
+    case 0:
+      return new Vector3f(value, vector.y, vector.z);
+    case 1:
+      return new Vector3f(vector.x, value, vector.z);
+    case 2:
+      return new Vector3f(vector.x, vector.y, value);
+    default:
+      throw new RangeError(`Axis ${axis} is out of range for Vector3f.`);
+  }
+};
+
 const sample = (volume: VolumeData, position: Vector3i): number => volume.sample(position.x, position.y, position.z);
 
 const intDiv = (numerator: number, denominator: number): number => {
@@ -139,6 +152,22 @@ const interpolate = (
 const buildCornerPositions = (min: Vector3i, lodScale: number): Vector3i[] =>
   Tables.CornerIndex.map((corner) => min.add(corner.multiplyScalar(lodScale)));
 
+const transitionCoordinates: ReadonlyArray<Vector3i> = [
+  new Vector3i(0, 0, 0),
+  new Vector3i(1, 0, 0),
+  new Vector3i(2, 0, 0),
+  new Vector3i(0, 1, 0),
+  new Vector3i(1, 1, 0),
+  new Vector3i(2, 1, 0),
+  new Vector3i(0, 2, 0),
+  new Vector3i(1, 2, 0),
+  new Vector3i(2, 2, 0),
+  new Vector3i(0, 0, 2),
+  new Vector3i(2, 0, 2),
+  new Vector3i(0, 2, 2),
+  new Vector3i(2, 2, 2),
+];
+
 const buildCornerNormals = (positions: Vector3i[], samples: VolumeData): Vector3f[] =>
   positions.map((p) => {
     const nx = (sample(samples, p.add(Vector3i.unitX)) - sample(samples, p.subtract(Vector3i.unitX))) * 0.5;
@@ -156,11 +185,100 @@ export interface ExtractBlockOptions {
   cellSize?: number;
 }
 
+export type TransitionFace =
+  | "negativeX"
+  | "positiveX"
+  | "negativeY"
+  | "positiveY"
+  | "negativeZ"
+  | "positiveZ";
+
+interface TransitionFaceDescriptor {
+  axis: 0 | 1 | 2;
+  direction: -1 | 1;
+  originOffset: Vector3i;
+  localX: Vector3i;
+  localY: Vector3i;
+  localZ: Vector3i;
+}
+
+const blockVector = (x: number, y: number, z: number): Vector3i =>
+  new Vector3i(x, y, z);
+
+const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor> = {
+  negativeX: {
+    axis: 0,
+    direction: -1,
+    originOffset: blockVector(0, 0, BLOCK_WIDTH),
+    localX: blockVector(0, 0, -1),
+    localY: blockVector(0, 1, 0),
+    localZ: blockVector(1, 0, 0),
+  },
+  positiveX: {
+    axis: 0,
+    direction: 1,
+    originOffset: blockVector(BLOCK_WIDTH, 0, 0),
+    localX: blockVector(0, 0, 1),
+    localY: blockVector(0, 1, 0),
+    localZ: blockVector(-1, 0, 0),
+  },
+  negativeY: {
+    axis: 1,
+    direction: -1,
+    originOffset: blockVector(0, 0, BLOCK_WIDTH),
+    localX: blockVector(1, 0, 0),
+    localY: blockVector(0, 0, -1),
+    localZ: blockVector(0, 1, 0),
+  },
+  positiveY: {
+    axis: 1,
+    direction: 1,
+    originOffset: blockVector(0, BLOCK_WIDTH, 0),
+    localX: blockVector(1, 0, 0),
+    localY: blockVector(0, 0, 1),
+    localZ: blockVector(0, -1, 0),
+  },
+  negativeZ: {
+    axis: 2,
+    direction: -1,
+    originOffset: blockVector(0, BLOCK_WIDTH, 0),
+    localX: blockVector(1, 0, 0),
+    localY: blockVector(0, -1, 0),
+    localZ: blockVector(0, 0, 1),
+  },
+  positiveZ: {
+    axis: 2,
+    direction: 1,
+    originOffset: blockVector(0, 0, BLOCK_WIDTH),
+    localX: blockVector(1, 0, 0),
+    localY: blockVector(0, 1, 0),
+    localZ: blockVector(0, 0, -1),
+  },
+};
+
 export class TransvoxelMesher {
   private readonly regularCache = new RegularCache(BLOCK_WIDTH);
   private readonly transitionCache = new TransitionCache(BLOCK_WIDTH);
 
   constructor(private readonly volume: VolumeData) {}
+
+  extractBlock(options: ExtractBlockOptions & { transitionFaces?: TransitionFace[] }): MeshData {
+    const regularMesh = this.extractRegularBlock(options);
+    const faces = options.transitionFaces?.filter(Boolean) ?? [];
+    if (faces.length === 0) {
+      return regularMesh;
+    }
+
+    const transitionMesh = this.extractTransitionFaces({ ...options, faces });
+    if (transitionMesh.vertices.length === 0) {
+      return regularMesh;
+    }
+
+    const vertexOffset = regularMesh.vertices.length;
+    transitionMesh.vertices.forEach((vertex) => regularMesh.vertices.push(vertex));
+    transitionMesh.indices.forEach((index) => regularMesh.indices.push(index + vertexOffset));
+    return regularMesh;
+  }
 
   extractRegularBlock({ origin, offset, lodIndex = 0, cellSize = 1 }: ExtractBlockOptions): MeshData {
     const vertices: TransvoxelVertex[] = [];
@@ -191,6 +309,90 @@ export class TransvoxelMesher {
     }
 
     return new MeshData(vertices, indices);
+  }
+
+  extractTransitionFaces({
+    origin,
+    offset,
+    lodIndex = 0,
+    cellSize = 1,
+    faces,
+  }: ExtractBlockOptions & { faces: TransitionFace[] }): MeshData {
+    if (lodIndex < 1) {
+      throw new RangeError("Transition faces require lodIndex >= 1.");
+    }
+
+    const uniqueFaces = Array.from(new Set(faces));
+    if (uniqueFaces.length === 0) {
+      return new MeshData();
+    }
+
+    const blockOffset =
+      offset ?? new Vector3f(origin.x * cellSize, origin.y * cellSize, origin.z * cellSize);
+
+    const vertices: TransvoxelVertex[] = [];
+    const indices: number[] = [];
+
+    for (const face of uniqueFaces) {
+      const descriptor = transitionFaceDescriptors[face];
+      if (!descriptor) {
+        throw new Error(`Unknown transition face "${face}".`);
+      }
+
+      this.transitionCache.reset();
+      this.generateTransitionFace(
+        descriptor,
+        origin,
+        blockOffset,
+        lodIndex,
+        cellSize,
+        vertices,
+        indices
+      );
+    }
+
+    return new MeshData(vertices, indices);
+  }
+
+  private generateTransitionFace(
+    descriptor: TransitionFaceDescriptor,
+    origin: Vector3i,
+    blockOffset: Vector3f,
+    lodIndex: number,
+    cellSize: number,
+    verts: TransvoxelVertex[],
+    indices: number[]
+  ): void {
+    const lodScale = 1 << lodIndex;
+    const sampleStep = 1 << (lodIndex - 1);
+    const stride = sampleStep << 1;
+
+    const faceOrigin = origin.add(descriptor.originOffset.multiplyScalar(lodScale));
+
+    for (let y = 0; y < BLOCK_WIDTH; y++) {
+      const rowOrigin = faceOrigin.add(descriptor.localY.multiplyScalar(y * stride));
+      for (let x = 0; x < BLOCK_WIDTH; x++) {
+        const cellOrigin = rowOrigin.add(descriptor.localX.multiplyScalar(x * stride));
+        const directionMask = (x > 0 ? 1 : 0) | ((y > 0 ? 1 : 0) << 1);
+        TransvoxelExtractor.polygonizeTransitionCell(
+          blockOffset,
+          cellOrigin,
+          descriptor.localX,
+          descriptor.localY,
+          descriptor.localZ,
+          x,
+          y,
+          cellSize,
+          lodIndex,
+          descriptor.axis,
+          directionMask,
+          this.volume,
+          verts,
+          indices,
+          this.transitionCache
+        );
+      }
+    }
   }
 }
 
@@ -320,6 +522,229 @@ export class TransvoxelExtractor {
     for (let t = 0; t < triangleCount; t++) {
       for (let i = 0; i < 3; i++) {
         indices.push(localVertexMapping[cellData.indices()[t * 3 + i]]);
+      }
+    }
+
+    return triangleCount;
+  }
+
+  static polygonizeTransitionCell(
+    offset: Vector3f,
+    origin: Vector3i,
+    localX: Vector3i,
+    localY: Vector3i,
+    localZ: Vector3i,
+    x: number,
+    y: number,
+    cellSize: number,
+    lodIndex: number,
+    axis: number,
+    directionMask: number,
+    samples: VolumeData,
+    verts: TransvoxelVertex[],
+    indices: number[],
+    cache: TransitionCache
+  ): number {
+    if (lodIndex < 1) {
+      throw new RangeError("Transition cells require lodIndex >= 1.");
+    }
+
+    const lodScale = 1 << lodIndex;
+    const sampleStep = 1 << (lodIndex - 1);
+    const last = 16 * lodScale;
+    let near = 0;
+
+    for (let i = 0; i < 3; i++) {
+      if (origin.component(i) === 0) {
+        near |= 1 << (i * 2);
+      }
+      if (origin.component(i) === last) {
+        near |= 1 << (i * 2 + 1);
+      }
+    }
+
+    const mx = localX.multiplyScalar(sampleStep);
+    const my = localY.multiplyScalar(sampleStep);
+    const mz = localZ.multiplyScalar(sampleStep);
+    const basis = Matrix3x3.fromColumns(
+      Vector3f.fromVector3i(mx),
+      Vector3f.fromVector3i(my),
+      Vector3f.fromVector3i(mz)
+    );
+
+    const positions = transitionCoordinates.map((coord) =>
+      origin.add(basis.multiplyVector3i(coord))
+    );
+
+    const normals = new Array<Vector3f>(13);
+    for (let i = 0; i < 9; i++) {
+      const p = positions[i];
+      const nx = (sample(samples, p.add(Vector3i.unitX)) - sample(samples, p.subtract(Vector3i.unitX))) * 0.5;
+      const ny = (sample(samples, p.add(Vector3i.unitY)) - sample(samples, p.subtract(Vector3i.unitY))) * 0.5;
+      const nz = (sample(samples, p.add(Vector3i.unitZ)) - sample(samples, p.subtract(Vector3i.unitZ))) * 0.5;
+      normals[i] = new Vector3f(nx, ny, nz).normalize();
+    }
+
+    normals[0x9] = normals[0];
+    normals[0xA] = normals[2];
+    normals[0xB] = normals[6];
+    normals[0xC] = normals[8];
+
+    const samplePositions = [
+      positions[0],
+      positions[1],
+      positions[2],
+      positions[3],
+      positions[4],
+      positions[5],
+      positions[6],
+      positions[7],
+      positions[8],
+      positions[0],
+      positions[2],
+      positions[6],
+      positions[8],
+    ];
+
+    const caseCode =
+      (signBit(sample(samples, positions[0])) * 0x001) |
+      (signBit(sample(samples, positions[1])) * 0x002) |
+      (signBit(sample(samples, positions[2])) * 0x004) |
+      (signBit(sample(samples, positions[5])) * 0x008) |
+      (signBit(sample(samples, positions[8])) * 0x010) |
+      (signBit(sample(samples, positions[7])) * 0x020) |
+      (signBit(sample(samples, positions[6])) * 0x040) |
+      (signBit(sample(samples, positions[3])) * 0x080) |
+      (signBit(sample(samples, positions[4])) * 0x100);
+
+    if (caseCode === 0 || caseCode === 0x1ff) {
+      return 0;
+    }
+
+    const cacheCell = cache.getCell(x, y);
+    cacheCell.caseIndex = caseCode;
+
+    const classIndex = Tables.TransitionCellClass[caseCode];
+    const cellData = Tables.TransitionRegularCellData[classIndex & 0x7f];
+    const inverse = (classIndex & 0x80) !== 0;
+    const localVertexMapping = new Array<number>(12).fill(-1);
+    const vertexCount = cellData.getVertexCount();
+    const triangleCount = cellData.getTriangleCount();
+
+    for (let i = 0; i < vertexCount; i++) {
+      const edgeCode = Tables.TransitionVertexData[caseCode][i];
+      const v0 = hiNibble(edgeCode & 0xff);
+      const v1 = loNibble(edgeCode & 0xff);
+      const lowside = v0 > 8 && v1 > 8;
+      const d0 = sample(samples, samplePositions[v0]);
+      const d1 = sample(samples, samplePositions[v1]);
+      let t = intDiv(d1 << 8, d1 - d0);
+      let u = 0x0100 - t;
+      const t0 = t * S;
+      const t1 = u * S;
+      const n0 = normals[v0];
+      const n1 = normals[v1];
+      const normal = computeNormal(n0, n1, t0, t1);
+
+      if ((t & 0x00ff) !== 0) {
+        const dir = hiNibble((edgeCode >> 8) & 0xff);
+        const idx = loNibble((edgeCode >> 8) & 0xff);
+        const present = (dir & directionMask) === dir;
+
+        if (present) {
+          const prev = cache.getCell(x - (dir & 1), y - ((dir >> 1) & 1));
+          if (prev.caseIndex === 0 || prev.caseIndex === 0x1ff) {
+            localVertexMapping[i] = -1;
+          } else {
+            localVertexMapping[i] = prev.verts[idx];
+          }
+        }
+
+        if (!present || localVertexMapping[i] < 0) {
+          const pi = interpolate(
+            toVector3f(positions[v0]),
+            toVector3f(positions[v1]),
+            samplePositions[v0],
+            samplePositions[v1],
+            samples,
+            lowside ? lodIndex : lodIndex - 1
+          );
+
+          let vertex: TransvoxelVertex;
+          if (lowside) {
+            const adjusted = setAxisComponent(pi, axis, origin.component(axis));
+            const delta = computeDelta(adjusted, lodIndex, BLOCK_WIDTH);
+            const projected = projectNormal(normal, delta);
+            vertex = {
+              primary: unusedVertexPosition,
+              secondary: offset.add(adjusted).add(projected),
+              normal,
+              near,
+            };
+          } else {
+            vertex = createVertex(pi, normal, 0, offset, lodIndex - 1);
+          }
+
+          localVertexMapping[i] = verts.push(vertex) - 1;
+
+          if ((dir & 8) !== 0) {
+            cacheCell.verts[idx] = localVertexMapping[i];
+          }
+        }
+      } else {
+        const v = t === 0 ? v1 : v0;
+        const cornerData = Tables.TransitionCornerData[v];
+        const dir = hiNibble(cornerData);
+        const idx = loNibble(cornerData);
+        const present = (dir & directionMask) === dir;
+
+        if (present) {
+          const prev = cache.getCell(x - (dir & 1), y - ((dir >> 1) & 1));
+          if (prev.caseIndex === 0 || prev.caseIndex === 0x1ff) {
+            localVertexMapping[i] = -1;
+          } else {
+            localVertexMapping[i] = prev.verts[idx];
+          }
+        }
+
+        if (!present || localVertexMapping[i] < 0) {
+          let pi = toVector3f(positions[v]);
+          let vertex: TransvoxelVertex;
+
+          if (v > 8) {
+            const adjusted = setAxisComponent(pi, axis, origin.component(axis));
+            const delta = computeDelta(adjusted, lodIndex, BLOCK_WIDTH);
+            const projected = projectNormal(normal, delta);
+            vertex = {
+              primary: unusedVertexPosition,
+              secondary: offset.add(adjusted).add(projected),
+              normal,
+              near,
+            };
+          } else {
+            vertex = createVertex(pi, normal, 0, offset, lodIndex - 1);
+          }
+
+          localVertexMapping[i] = verts.push(vertex) - 1;
+          cacheCell.verts[idx] = localVertexMapping[i];
+        }
+      }
+    }
+
+    const cellIndices = cellData.indices();
+    for (let t = 0; t < triangleCount; t++) {
+      if (inverse) {
+        indices.push(
+          localVertexMapping[cellIndices[t * 3 + 2]],
+          localVertexMapping[cellIndices[t * 3 + 1]],
+          localVertexMapping[cellIndices[t * 3 + 0]]
+        );
+      } else {
+        indices.push(
+          localVertexMapping[cellIndices[t * 3 + 0]],
+          localVertexMapping[cellIndices[t * 3 + 1]],
+          localVertexMapping[cellIndices[t * 3 + 2]]
+        );
       }
     }
 

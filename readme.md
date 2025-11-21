@@ -4,6 +4,57 @@ Authors: BinaryConstruct, Oggs91
 Implmentation of Eric Lengyl's Transvoxel Algorithm in c# for use in MonoGame, Unity, etc.
 ![transvoxel-xna-test.png](https://raw.githubusercontent.com/BinaryConstruct/Transvoxel-XNA/master/Docs/transvoxel-xna-test.png)
 
+## TypeScript port
+
+An ES2020/TypeScript mesher now lives under `src/`. It exposes a `TransvoxelMesher` that can emit
+regular cell geometry as well as the transition cells needed to stitch adjacent LODs.
+
+```ts
+import { TransvoxelMesher, TransitionFace } from "./dist/surface-extractor/transvoxel-extractor.js";
+import { FunctionalVolume } from "./dist/volume/volume-data.js";
+import { Vector3i } from "./dist/math/vector3i.js";
+
+const volume = new FunctionalVolume((x, y, z) => /* signed density */);
+const mesher = new TransvoxelMesher(volume);
+const faces: TransitionFace[] = [
+	"negativeX",
+	"positiveX",
+	"negativeY",
+	"positiveY",
+	"negativeZ",
+	"positiveZ",
+];
+
+const mesh = mesher.extractBlock({
+	origin: new Vector3i(0, 0, 0),
+	lodIndex: 1,
+	cellSize: 1,
+	transitionFaces: faces,
+});
+
+console.log(mesh.vertices.length, mesh.indices.length);
+```
+
+### Building the library
+
+```
+npm install
+npm run build
+```
+
+### Three.js demo
+
+A small WebGL demo that consumes the TypeScript port via Vite + Three.js is available under
+`demo/`.
+
+```
+npm run demo:dev     # start a local dev server
+npm run demo:build   # produce a static build in demo/dist
+```
+
+The demo renders a single LOD 1 chunk with all six transition faces enabled so the seam logic can be
+inspected in real time.
+
 ## Commit History
 https://github.com/BinaryConstruct/Transvoxel-XNA/commits/master
 
