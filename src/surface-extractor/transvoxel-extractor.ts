@@ -2,7 +2,7 @@ import { Tables, RegularCell } from "../lengyel/tables";
 import { Vector3f } from "../math/vector3f";
 import { Vector3i } from "../math/vector3i";
 import { Matrix3x3 } from "../math/matrix3x3";
-import { VolumeData } from "../volume/volume-data";
+import { DensityFunction } from "../volume/volume-data";
 import { RegularCache, TransitionCache } from "./cache";
 import { MeshData } from "./mesh-data";
 import { TransvoxelVertex, unusedVertexPosition } from "./vertex";
@@ -29,7 +29,7 @@ const setAxisComponent = (vector: Vector3f, axis: number, value: number): Vector
   }
 };
 
-const sample = (volume: VolumeData, position: Vector3i): number => volume.sample(position.x, position.y, position.z);
+const sample = (sampler: DensityFunction, position: Vector3i): number => sampler(position.x, position.y, position.z);
 
 const intDiv = (numerator: number, denominator: number): number => {
   if (denominator === 0) {
@@ -114,7 +114,7 @@ const interpolate = (
   v1: Vector3f,
   p0: Vector3i,
   p1: Vector3i,
-  samples: VolumeData,
+  samples: DensityFunction,
   lodIndex = 0
 ): Vector3f => {
   let s0 = sample(samples, p0);
@@ -168,7 +168,7 @@ const transitionCoordinates: ReadonlyArray<Vector3i> = [
   new Vector3i(2, 2, 2),
 ];
 
-const buildCornerNormals = (positions: Vector3i[], samples: VolumeData): Vector3f[] =>
+const buildCornerNormals = (positions: Vector3i[], samples: DensityFunction): Vector3f[] =>
   positions.map((p) => {
     const nx = (sample(samples, p.add(Vector3i.unitX)) - sample(samples, p.subtract(Vector3i.unitX))) * 0.5;
     const ny = (sample(samples, p.add(Vector3i.unitY)) - sample(samples, p.subtract(Vector3i.unitY))) * 0.5;
@@ -260,16 +260,19 @@ export class TransvoxelMesher {
   private readonly regularCache = new RegularCache(BLOCK_WIDTH);
   private readonly transitionCache = new TransitionCache(BLOCK_WIDTH);
 
-  constructor(private readonly volume: VolumeData) {}
+  constructor() {}
 
-  extractBlock(options: ExtractBlockOptions & { transitionFaces?: TransitionFace[] }): MeshData {
-    const regularMesh = this.extractRegularBlock(options);
+  extractBlock(
+    samples: DensityFunction,
+    options: ExtractBlockOptions & { transitionFaces?: TransitionFace[] }
+  ): MeshData {
+    const regularMesh = this.extractRegularBlock(samples, options);
     const faces = options.transitionFaces?.filter(Boolean) ?? [];
     if (faces.length === 0) {
       return regularMesh;
     }
 
-    const transitionMesh = this.extractTransitionFaces({ ...options, faces });
+    const transitionMesh = this.extractTransitionFaces(samples, { ...options, faces });
     if (transitionMesh.vertices.length === 0) {
       return regularMesh;
     }
@@ -280,7 +283,10 @@ export class TransvoxelMesher {
     return regularMesh;
   }
 
-  extractRegularBlock({ origin, offset, lodIndex = 0, cellSize = 1 }: ExtractBlockOptions): MeshData {
+  extractRegularBlock(
+    samples: DensityFunction,
+    { origin, offset, lodIndex = 0, cellSize = 1 }: ExtractBlockOptions
+  ): MeshData {
     const vertices: TransvoxelVertex[] = [];
     const indices: number[] = [];
     this.regularCache.reset();
@@ -297,7 +303,7 @@ export class TransvoxelMesher {
             min,
             blockOffset,
             xyz,
-            this.volume,
+            samples,
             lodIndex,
             cellSize,
             vertices,
@@ -311,13 +317,16 @@ export class TransvoxelMesher {
     return new MeshData(vertices, indices);
   }
 
-  extractTransitionFaces({
-    origin,
-    offset,
-    lodIndex = 0,
-    cellSize = 1,
-    faces,
-  }: ExtractBlockOptions & { faces: TransitionFace[] }): MeshData {
+  extractTransitionFaces(
+    samples: DensityFunction,
+    {
+      origin,
+      offset,
+      lodIndex = 0,
+      cellSize = 1,
+      faces,
+    }: ExtractBlockOptions & { faces: TransitionFace[] }
+  ): MeshData {
     if (lodIndex < 1) {
       throw new RangeError("Transition faces require lodIndex >= 1.");
     }
@@ -346,6 +355,7 @@ export class TransvoxelMesher {
         blockOffset,
         lodIndex,
         cellSize,
+        samples,
         vertices,
         indices
       );
@@ -360,6 +370,7 @@ export class TransvoxelMesher {
     blockOffset: Vector3f,
     lodIndex: number,
     cellSize: number,
+    samples: DensityFunction,
     verts: TransvoxelVertex[],
     indices: number[]
   ): void {
@@ -386,7 +397,7 @@ export class TransvoxelMesher {
           lodIndex,
           descriptor.axis,
           directionMask,
-          this.volume,
+          samples,
           verts,
           indices,
           this.transitionCache
@@ -403,7 +414,7 @@ export class TransvoxelExtractor {
     min: Vector3i,
     offset: Vector3f,
     xyz: Vector3i,
-    samples: VolumeData,
+    samples: DensityFunction,
     lodIndex: number,
     cellSize: number,
     verts: TransvoxelVertex[],
@@ -561,7 +572,7 @@ export class TransvoxelExtractor {
     lodIndex: number,
     axis: number,
     directionMask: number,
-    samples: VolumeData,
+    samples: DensityFunction,
     verts: TransvoxelVertex[],
     indices: number[],
     cache: TransitionCache

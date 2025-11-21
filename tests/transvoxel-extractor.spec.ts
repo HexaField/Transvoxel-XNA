@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { TransvoxelMesher, TransvoxelExtractor, TransitionFace } from "../src/surface-extractor/transvoxel-extractor";
-import { FunctionalVolume, type DensityFunction, type VolumeData } from "../src/volume/volume-data";
+import type { DensityFunction } from "../src/volume/volume-data";
 import { Vector3i } from "../src/math/vector3i";
 import { Vector3f } from "../src/math/vector3f";
 import { RegularCache, TransitionCache } from "../src/surface-extractor/cache";
@@ -9,14 +9,13 @@ import { TransvoxelVertex, getRenderablePosition, unusedVertexPosition } from ".
 import { Tables } from "../src/lengyel/tables";
 import { buildRegularCaseMesh, buildTransitionCaseMesh } from "./case-fixtures";
 
-const createSphereVolume = (radius = 7, center = 8) =>
-  new FunctionalVolume((x, y, z) => {
-    const dx = x - center;
-    const dy = y - center;
-    const dz = z - center;
-    const value = radius * radius - (dx * dx + dy * dy + dz * dz);
-    return Math.floor(value);
-  });
+const createSphereVolume = (radius = 7, center = 8): DensityFunction => (x, y, z) => {
+  const dx = x - center;
+  const dy = y - center;
+  const dz = z - center;
+  const value = radius * radius - (dx * dx + dy * dy + dz * dz);
+  return Math.floor(value);
+};
 
 type AxisBounds = { x: number; y: number; z: number };
 
@@ -49,19 +48,20 @@ const newBounds = (): SampleBounds => ({
   max: { x: Number.NEGATIVE_INFINITY, y: Number.NEGATIVE_INFINITY, z: Number.NEGATIVE_INFINITY },
 });
 
-class RecordingVolume implements VolumeData {
+class RecordingSampler {
   private bounds: SampleBounds = newBounds();
+  readonly sampler: DensityFunction;
 
-  constructor(private readonly fn: DensityFunction) {}
-
-  sample(x: number, y: number, z: number): number {
-    this.bounds.min.x = Math.min(this.bounds.min.x, x);
-    this.bounds.min.y = Math.min(this.bounds.min.y, y);
-    this.bounds.min.z = Math.min(this.bounds.min.z, z);
-    this.bounds.max.x = Math.max(this.bounds.max.x, x);
-    this.bounds.max.y = Math.max(this.bounds.max.y, y);
-    this.bounds.max.z = Math.max(this.bounds.max.z, z);
-    return this.fn(x, y, z);
+  constructor(private readonly fn: DensityFunction) {
+    this.sampler = (x, y, z) => {
+      this.bounds.min.x = Math.min(this.bounds.min.x, x);
+      this.bounds.min.y = Math.min(this.bounds.min.y, y);
+      this.bounds.min.z = Math.min(this.bounds.min.z, z);
+      this.bounds.max.x = Math.max(this.bounds.max.x, x);
+      this.bounds.max.y = Math.max(this.bounds.max.y, y);
+      this.bounds.max.z = Math.max(this.bounds.max.z, z);
+      return this.fn(x, y, z);
+    };
   }
 
   reset(): void {
@@ -75,7 +75,7 @@ class RecordingVolume implements VolumeData {
 
 describe("TransvoxelExtractor", () => {
   it("returns zero geometry for homogeneous densities", () => {
-    const volume = new FunctionalVolume(() => 64);
+    const volume: DensityFunction = () => 64;
     const cache = new RegularCache(1);
     const verts: TransvoxelVertex[] = [];
     const indices: number[] = [];
@@ -99,11 +99,11 @@ describe("TransvoxelExtractor", () => {
 
   it("produces deterministic regular block meshes", () => {
     const volume = createSphereVolume();
-    const mesher = new TransvoxelMesher(volume);
+    const mesher = new TransvoxelMesher();
     const options = { origin: Vector3i.zero, lodIndex: 0 as const, cellSize: 1 };
 
-    const meshA = mesher.extractRegularBlock(options);
-    const meshB = mesher.extractRegularBlock(options);
+    const meshA = mesher.extractRegularBlock(volume, options);
+    const meshB = mesher.extractRegularBlock(volume, options);
 
     expect(meshA.vertices.length).toBeGreaterThan(0);
     expect(meshA.indices.length % 3).toBe(0);
@@ -113,7 +113,7 @@ describe("TransvoxelExtractor", () => {
 
   it("adds seam data when transition faces are extracted", () => {
     const volume = createSphereVolume();
-    const mesher = new TransvoxelMesher(volume);
+    const mesher = new TransvoxelMesher();
     const faces: TransitionFace[] = [
       "negativeX",
       "positiveX",
@@ -123,8 +123,8 @@ describe("TransvoxelExtractor", () => {
       "positiveZ",
     ];
 
-    const regularOnly = mesher.extractRegularBlock({ origin: Vector3i.zero, lodIndex: 1, cellSize: 1 });
-    const withTransitions = mesher.extractBlock({
+    const regularOnly = mesher.extractRegularBlock(volume, { origin: Vector3i.zero, lodIndex: 1, cellSize: 1 });
+    const withTransitions = mesher.extractBlock(volume, {
       origin: Vector3i.zero,
       lodIndex: 1,
       cellSize: 1,
@@ -139,8 +139,8 @@ describe("TransvoxelExtractor", () => {
   });
 
   it("samples transition faces within the block bounds", () => {
-    const volume = new RecordingVolume(() => 64);
-    const mesher = new TransvoxelMesher(volume);
+    const volume = new RecordingSampler(() => 64);
+    const mesher = new TransvoxelMesher();
     const lodIndex = 1;
     const extent = TransvoxelExtractor.BlockWidth * (1 << lodIndex);
     const margin = 1;
@@ -155,7 +155,7 @@ describe("TransvoxelExtractor", () => {
 
     for (const face of faces) {
       volume.reset();
-      mesher.extractTransitionFaces({
+      mesher.extractTransitionFaces(volume.sampler, {
         origin: Vector3i.zero,
         lodIndex,
         cellSize: 1,
@@ -184,7 +184,7 @@ describe("TransvoxelExtractor", () => {
   });
 
   it("reuses cached vertices along the Z axis", () => {
-    const volume = new FunctionalVolume((_, __, z) => Math.round((z - 0.5) * 127));
+    const volume: DensityFunction = (_x, _y, z) => Math.round((z - 0.5) * 127);
     const cache = new RegularCache(2);
     const verts: TransvoxelVertex[] = [];
     const indices: number[] = [];

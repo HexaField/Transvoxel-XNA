@@ -1,7 +1,7 @@
 import { describe, it } from "vitest";
 import { TransvoxelExtractor } from "../src/surface-extractor/transvoxel-extractor";
 import { RegularCache } from "../src/surface-extractor/cache";
-import { FunctionalVolume } from "../src/volume/volume-data";
+import type { DensityFunction } from "../src/volume/volume-data";
 import { Vector3i } from "../src/math/vector3i";
 import { Vector3f } from "../src/math/vector3f";
 import { getRenderablePosition, TransvoxelVertex } from "../src/surface-extractor/vertex";
@@ -13,17 +13,16 @@ const lodScale = 1 << lodIndex;
 const blockExtent = BLOCK_WIDTH * lodScale * cellSize;
 const blockCenter = blockExtent * 0.5;
 
-const createSampleVolume = () =>
-  new FunctionalVolume((x, y, z) => {
-    const nx = (x - blockCenter) / blockExtent;
-    const ny = (y - blockCenter) / blockExtent;
-    const nz = (z - blockCenter) / blockExtent;
-    const sphere = nx * nx + ny * ny + nz * nz - 0.18;
-    const folds =
-      Math.sin(nx * 8.0) * 0.35 + Math.cos(ny * 6.0) * 0.35 + Math.sin(nz * 7.0) * 0.35;
-    const density = sphere + 0.25 * folds;
-    return Math.floor(density * 127);
-  });
+const createSampleVolume = (): DensityFunction => (x, y, z) => {
+  const nx = (x - blockCenter) / blockExtent;
+  const ny = (y - blockCenter) / blockExtent;
+  const nz = (z - blockCenter) / blockExtent;
+  const sphere = nx * nx + ny * ny + nz * nz - 0.18;
+  const folds =
+    Math.sin(nx * 8.0) * 0.35 + Math.cos(ny * 6.0) * 0.35 + Math.sin(nz * 7.0) * 0.35;
+  const density = sphere + 0.25 * folds;
+  return Math.floor(density * 127);
+};
 
 const blockOrigin = Vector3i.zero;
 const blockOffset = new Vector3f(0, 0, 0);

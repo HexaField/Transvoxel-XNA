@@ -11,11 +11,10 @@ regular cell geometry as well as the transition cells needed to stitch adjacent 
 
 ```ts
 import { TransvoxelMesher, TransitionFace } from "./dist/surface-extractor/transvoxel-extractor.js";
-import { FunctionalVolume } from "./dist/volume/volume-data.js";
 import { Vector3i } from "./dist/math/vector3i.js";
 
-const volume = new FunctionalVolume((x, y, z) => /* signed density */);
-const mesher = new TransvoxelMesher(volume);
+const density = (x: number, y: number, z: number) => /* signed density */;
+const mesher = new TransvoxelMesher();
 const faces: TransitionFace[] = [
 	"negativeX",
 	"positiveX",
@@ -25,7 +24,7 @@ const faces: TransitionFace[] = [
 	"positiveZ",
 ];
 
-const mesh = mesher.extractBlock({
+const mesh = mesher.extractBlock(density, {
 	origin: new Vector3i(0, 0, 0),
 	lodIndex: 1,
 	cellSize: 1,

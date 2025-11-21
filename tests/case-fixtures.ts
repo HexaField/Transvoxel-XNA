@@ -6,7 +6,7 @@ import { RegularCache, TransitionCache } from "../src/surface-extractor/cache";
 import { MeshData } from "../src/surface-extractor/mesh-data";
 import { TransvoxelExtractor } from "../src/surface-extractor/transvoxel-extractor";
 import { TransvoxelVertex } from "../src/surface-extractor/vertex";
-import { VolumeData } from "../src/volume/volume-data";
+import type { DensityFunction } from "../src/volume/volume-data";
 
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
 const vectorKey = (vector: Vector3i): string => `${vector.x},${vector.y},${vector.z}`;
@@ -76,33 +76,27 @@ Tables.CornerIndex.forEach((corner, index) => {
   regularCornerLookup.set(vectorKey(corner), index);
 });
 
-class RegularCaseVolume implements VolumeData {
-  constructor(private readonly caseCode: number) {}
-
-  sample(x: number, y: number, z: number): number {
+const createRegularCaseSampler = (caseCode: number): DensityFunction =>
+  (x, y, z) => {
     const clamped = new Vector3i(clamp(x, 0, 1), clamp(y, 0, 1), clamp(z, 0, 1));
     const key = vectorKey(clamped);
     const cornerIndex = regularCornerLookup.get(key);
     if (cornerIndex === undefined) {
       return 1;
     }
-    const filled = ((this.caseCode >> cornerIndex) & 1) === 1;
+    const filled = ((caseCode >> cornerIndex) & 1) === 1;
     return filled ? -1 : 1;
-  }
-}
+  };
 
-class TransitionCaseVolume implements VolumeData {
-  constructor(private readonly caseCode: number) {}
-
-  sample(x: number, y: number, z: number): number {
+const createTransitionCaseSampler = (caseCode: number): DensityFunction =>
+  (x, y, z) => {
     const bitIndex = transitionCoordinateBitLookup.get(`${x},${y},${z}`);
     if (bitIndex === undefined) {
       return 1;
     }
-    const filled = ((this.caseCode >> bitIndex) & 1) === 1;
+    const filled = ((caseCode >> bitIndex) & 1) === 1;
     return filled ? -1 : 1;
-  }
-}
+  };
 
 export function buildRegularCaseMesh(caseCode: number, cache: RegularCache): MeshData {
   cache.reset();
@@ -112,7 +106,7 @@ export function buildRegularCaseMesh(caseCode: number, cache: RegularCache): Mes
     Vector3i.zero,
     Vector3f.zero,
     Vector3i.zero,
-    new RegularCaseVolume(caseCode),
+    createRegularCaseSampler(caseCode),
     0,
     1,
     vertices,
@@ -138,7 +132,7 @@ export function buildTransitionCaseMesh(caseCode: number, cache: TransitionCache
     TRANSITION_LOD_INDEX,
     transitionDescriptor.axis,
     0,
-    new TransitionCaseVolume(caseCode),
+    createTransitionCaseSampler(caseCode),
     vertices,
     indices,
     cache

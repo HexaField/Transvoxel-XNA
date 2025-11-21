@@ -1,7 +1,7 @@
 import { BufferGeometry, Float32BufferAttribute } from "three";
 import { MeshData } from "../src/surface-extractor/mesh-data";
 import { getRenderablePosition } from "../src/surface-extractor/vertex";
-import { FunctionalVolume } from "../src/volume/volume-data";
+import type { DensityFunction } from "../src/volume/volume-data";
 
 export interface BuiltGeometry {
   geometry: BufferGeometry;
@@ -37,8 +37,8 @@ export const meshDataToGeometry = (meshData: MeshData): BuiltGeometry => {
   return { geometry, positions, normals, indices };
 };
 
-export const createSampleVolume = (blockCenter: number, blockExtent: number): FunctionalVolume =>
-  new FunctionalVolume((x, y, z) => {
+export const createSampleVolume = (blockCenter: number, blockExtent: number): DensityFunction =>
+  (x, y, z) => {
     const nx = (x - blockCenter) / blockExtent;
     const ny = (y - blockCenter) / blockExtent;
     const nz = (z - blockCenter) / blockExtent;
@@ -46,4 +46,4 @@ export const createSampleVolume = (blockCenter: number, blockExtent: number): Fu
     const folds = Math.sin(nx * 8.0) * 0.35 + Math.cos(ny * 6.0) * 0.35 + Math.sin(nz * 7.0) * 0.35;
     const density = sphere + 0.25 * folds;
     return Math.floor(density * 127);
-  });
+  };

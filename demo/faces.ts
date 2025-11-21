@@ -24,7 +24,7 @@ import { RegularCache, TransitionCache } from "../src/surface-extractor/cache";
 import { MeshData } from "../src/surface-extractor/mesh-data";
 import { TransvoxelExtractor } from "../src/surface-extractor/transvoxel-extractor";
 import { TransvoxelVertex } from "../src/surface-extractor/vertex";
-import { VolumeData } from "../src/volume/volume-data";
+import type { DensityFunction } from "../src/volume/volume-data";
 import { meshDataToGeometry } from "./mesh-utils";
 import {
   analyzeOrientation,
@@ -147,32 +147,26 @@ transitionBitOrder.forEach((positionIndex, bitIndex) => {
   }
 });
 
-class RegularCaseVolume implements VolumeData {
-  constructor(private readonly caseCode: number) {}
-
-  sample(x: number, y: number, z: number): number {
+const createRegularCaseSampler = (caseCode: number): DensityFunction =>
+  (x, y, z) => {
     const clamped = new Vector3i(clamp(x, 0, 1), clamp(y, 0, 1), clamp(z, 0, 1));
     const cornerIndex = regularCornerLookup.get(vectorKey(clamped));
     if (cornerIndex === undefined) {
       return 1;
     }
-    const filled = ((this.caseCode >> cornerIndex) & 1) === 1;
+    const filled = ((caseCode >> cornerIndex) & 1) === 1;
     return filled ? -1 : 1;
-  }
-}
+  };
 
-class TransitionCaseVolume implements VolumeData {
-  constructor(private readonly caseCode: number) {}
-
-  sample(x: number, y: number, z: number): number {
+const createTransitionCaseSampler = (caseCode: number): DensityFunction =>
+  (x, y, z) => {
     const bitIndex = transitionCoordinateBitLookup.get(`${x},${y},${z}`);
     if (bitIndex === undefined) {
       return 1;
     }
-    const filled = ((this.caseCode >> bitIndex) & 1) === 1;
+    const filled = ((caseCode >> bitIndex) & 1) === 1;
     return filled ? -1 : 1;
-  }
-}
+  };
 
 const previewObserver = new IntersectionObserver(handlePreviewIntersection, {
   rootMargin: "200px",
@@ -411,7 +405,7 @@ function buildRegularCaseMesh(caseCode: number): MeshData {
     Vector3i.zero,
     Vector3f.zero,
     Vector3i.zero,
-    new RegularCaseVolume(caseCode),
+    createRegularCaseSampler(caseCode),
     0,
     1,
     vertices,
@@ -437,7 +431,7 @@ function buildTransitionCaseMesh(caseCode: number): MeshData {
     TRANSITION_LOD_INDEX,
     transitionDescriptor.axis,
     0,
-    new TransitionCaseVolume(caseCode),
+    createTransitionCaseSampler(caseCode),
     vertices,
     indices,
     transitionCache

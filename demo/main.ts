@@ -37,7 +37,7 @@ import {
   createInvertedHelper,
   createNormalHelper,
 } from "./debug-helpers";
-import { VolumeData } from "../src/volume/volume-data";
+import type { DensityFunction } from "../src/volume/volume-data";
 import type { TransvoxelVertex } from "../src/surface-extractor/vertex";
 
 const mount = document.querySelector<HTMLDivElement>("#app");
@@ -95,9 +95,9 @@ scene.add(rimLight);
 
 scene.add(new AmbientLight(0xffffff, 0.4));
 
-const volume: VolumeData = createSampleVolume(blockCenter, blockExtent);
+const volume: DensityFunction = createSampleVolume(blockCenter, blockExtent);
 
-const mesher = new TransvoxelMesher(volume);
+const mesher = new TransvoxelMesher();
 const transitionFaces: TransitionFace[] = [
   "negativeX",
   "positiveX",
@@ -107,12 +107,12 @@ const transitionFaces: TransitionFace[] = [
   "positiveZ",
 ];
 
-const regularMeshData = mesher.extractRegularBlock({
+const regularMeshData = mesher.extractRegularBlock(volume, {
   origin: blockOrigin,
   lodIndex,
   cellSize,
 });
-const transitionMeshData = mesher.extractTransitionFaces({
+const transitionMeshData = mesher.extractTransitionFaces(volume, {
   origin: blockOrigin,
   lodIndex,
   cellSize,
@@ -416,7 +416,7 @@ interface DiagnosticContext {
   cellSize: number;
   blockOrigin: Vector3i;
   blockOffsetVector: Vector3f;
-  volume: VolumeData;
+  volume: DensityFunction;
 }
 
 const movementMap: Record<string, { x: number; y: number; z: number }> = {
