@@ -564,6 +564,7 @@ function evaluateRegularCellDiagnostics(
     min,
     context.blockOffsetVector,
     xyz,
+    context.blockOrigin,
     context.volume,
     context.lodIndex,
     context.cellSize,

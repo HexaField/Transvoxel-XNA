@@ -583,7 +583,6 @@ class ChunkManager {
 
     const meshData = this.mesher.extractBlock(sampler, {
       origin,
-      offset: Vector3f.zero,
       lodIndex: descriptor.lodIndex,
       cellSize: CELL_SIZE,
       transitionFaces: descriptor.transitionFaces,
@@ -743,10 +742,12 @@ function createChunkWorker(): Worker {
     self.onmessage = (event) => {
       const { key, lodIndex, chunkX, chunkZ, originY } = event.data;
       const range = BLOCK_WIDTH << lodIndex;
-      const sampleSize = range + 3;
-      const minX = chunkX * range - 1;
-      const minY = originY - 1;
-      const minZ = chunkZ * range - 1;
+      const transitionReach = lodIndex === 0 ? 1 : ((1 << (lodIndex - 1)) * 2 + 1);
+      const padding = Math.max(1, transitionReach);
+      const sampleSize = range + padding * 2 + 1;
+      const minX = chunkX * range - padding;
+      const minY = originY - padding;
+      const minZ = chunkZ * range - padding;
       const totalSamples = sampleSize * sampleSize * sampleSize;
       const data = new Int8Array(totalSamples);
       let index = 0;

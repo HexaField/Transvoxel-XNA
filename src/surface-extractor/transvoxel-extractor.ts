@@ -12,7 +12,7 @@ const S = 1.0 / 256.0;
 
 const hiNibble = (value: number): number => (value >> 4) & 0x0f;
 const loNibble = (value: number): number => value & 0x0f;
-const signBit = (value: number): number => (value >> 7) & 1;
+const signBit = (value: number): number => (value < 0 ? 1 : 0);
 
 const toVector3f = (vector: Vector3i): Vector3f => new Vector3f(vector.x, vector.y, vector.z);
 
@@ -87,12 +87,13 @@ const createVertex = (
   normal: Vector3f,
   near: number,
   offset: Vector3f,
-  lodIndex: number
+  lodIndex: number,
+  cellSize: number
 ): TransvoxelVertex => {
-  const primary = offset.add(pi);
+  const primary = offset.add(pi.multiplyScalar(cellSize));
   if (near > 0) {
     const delta = computeDelta(pi, lodIndex, BLOCK_WIDTH);
-    const projected = projectNormal(normal, delta);
+    const projected = projectNormal(normal, delta).multiplyScalar(cellSize);
     return {
       primary,
       secondary: primary.add(projected),
@@ -212,7 +213,7 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
     originOffset: blockVector(0, 0, BLOCK_WIDTH),
     localX: blockVector(0, 0, -1),
     localY: blockVector(0, 1, 0),
-    localZ: blockVector(1, 0, 0),
+    localZ: blockVector(-1, 0, 0),
   },
   positiveX: {
     axis: 0,
@@ -220,7 +221,7 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
     originOffset: blockVector(BLOCK_WIDTH, 0, 0),
     localX: blockVector(0, 0, 1),
     localY: blockVector(0, 1, 0),
-    localZ: blockVector(-1, 0, 0),
+    localZ: blockVector(1, 0, 0),
   },
   negativeY: {
     axis: 1,
@@ -228,7 +229,7 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
     originOffset: blockVector(0, 0, BLOCK_WIDTH),
     localX: blockVector(1, 0, 0),
     localY: blockVector(0, 0, -1),
-    localZ: blockVector(0, 1, 0),
+    localZ: blockVector(0, -1, 0),
   },
   positiveY: {
     axis: 1,
@@ -236,7 +237,7 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
     originOffset: blockVector(0, BLOCK_WIDTH, 0),
     localX: blockVector(1, 0, 0),
     localY: blockVector(0, 0, 1),
-    localZ: blockVector(0, -1, 0),
+    localZ: blockVector(0, 1, 0),
   },
   negativeZ: {
     axis: 2,
@@ -244,7 +245,7 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
     originOffset: blockVector(0, 0, 0),
     localX: blockVector(1, 0, 0),
     localY: blockVector(0, 1, 0),
-    localZ: blockVector(0, 0, 1),
+    localZ: blockVector(0, 0, -1),
   },
   positiveZ: {
     axis: 2,
@@ -252,7 +253,7 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
     originOffset: blockVector(0, 0, BLOCK_WIDTH),
     localX: blockVector(1, 0, 0),
     localY: blockVector(0, 1, 0),
-    localZ: blockVector(0, 0, -1),
+    localZ: blockVector(0, 0, 1),
   },
 };
 
@@ -303,6 +304,7 @@ export class TransvoxelMesher {
             min,
             blockOffset,
             xyz,
+            origin,
             samples,
             lodIndex,
             cellSize,
@@ -400,7 +402,8 @@ export class TransvoxelMesher {
           samples,
           verts,
           indices,
-          this.transitionCache
+          this.transitionCache,
+          origin
         );
       }
     }
@@ -414,6 +417,7 @@ export class TransvoxelExtractor {
     min: Vector3i,
     offset: Vector3f,
     xyz: Vector3i,
+    blockOrigin: Vector3i,
     samples: DensityFunction,
     lodIndex: number,
     cellSize: number,
@@ -423,15 +427,17 @@ export class TransvoxelExtractor {
   ): number {
     const lodScale = 1 << lodIndex;
     const last = 15 * lodScale;
+    const blockOriginF = Vector3f.fromVector3i(blockOrigin);
     const directionMask =
       (xyz.x > 0 ? 1 : 0) | ((xyz.y > 0 ? 1 : 0) << 1) | ((xyz.z > 0 ? 1 : 0) << 2);
     let near = 0;
+    const localMin = min.subtract(blockOrigin);
 
     for (let i = 0; i < 3; i++) {
-      if (min.component(i) === 0) {
+      if (localMin.component(i) === 0) {
         near |= 1 << (i * 2);
       }
-      if (min.component(i) === last) {
+      if (localMin.component(i) === last) {
         near |= 1 << (i * 2 + 1);
       }
     }
@@ -441,18 +447,18 @@ export class TransvoxelExtractor {
     const cornerNormals = buildCornerNormals(cornerPositions, samples);
 
     const caseCode =
-      ((cornerSamples[0] >> 7) & 0x01) |
-      ((cornerSamples[1] >> 6) & 0x02) |
-      ((cornerSamples[2] >> 5) & 0x04) |
-      ((cornerSamples[3] >> 4) & 0x08) |
-      ((cornerSamples[4] >> 3) & 0x10) |
-      ((cornerSamples[5] >> 2) & 0x20) |
-      ((cornerSamples[6] >> 1) & 0x40) |
-      (cornerSamples[7] & 0x80);
+      (signBit(cornerSamples[0]) << 0) |
+      (signBit(cornerSamples[1]) << 1) |
+      (signBit(cornerSamples[2]) << 2) |
+      (signBit(cornerSamples[3]) << 3) |
+      (signBit(cornerSamples[4]) << 4) |
+      (signBit(cornerSamples[5]) << 5) |
+      (signBit(cornerSamples[6]) << 6) |
+      (signBit(cornerSamples[7]) << 7);
 
     const cacheCell = cache.getCellByVector(xyz);
     cacheCell.caseIndex = caseCode;
-    if ((caseCode ^ ((cornerSamples[7] >> 7) & 0xff)) === 0) {
+    if (caseCode === 0 || caseCode === 0xff) {
       return 0;
     }
 
@@ -502,9 +508,10 @@ export class TransvoxelExtractor {
         }
 
         if (!present || localVertexMapping[i] < 0) {
-          const pi = interpolate(toVector3f(p0), toVector3f(p1), p0, p1, samples, lodIndex);
+          const interpolated = interpolate(toVector3f(p0), toVector3f(p1), p0, p1, samples, lodIndex);
+          const pi = interpolated.subtract(blockOriginF);
           const normal = computeNormal(n0, n1, t0, t1);
-          const vertex = createVertex(pi, normal, near, offset, lodIndex);
+          const vertex = createVertex(pi, normal, near, offset, lodIndex, cellSize);
           localVertexMapping[i] = verts.push(vertex) - 1;
 
           if ((dir & 8) !== 0) {
@@ -514,9 +521,12 @@ export class TransvoxelExtractor {
         }
 
       } else if (t === 0 && v1 === 7) {
-        const pi = toVector3f(p1).multiplyScalar(t0).add(toVector3f(p1).multiplyScalar(t1));
+        const pi = toVector3f(p1)
+          .multiplyScalar(t0)
+          .add(toVector3f(p1).multiplyScalar(t1))
+          .subtract(blockOriginF);
         const normal = computeNormal(n0, n1, t0, t1);
-        const vertex = createVertex(pi, normal, near, offset, lodIndex);
+        const vertex = createVertex(pi, normal, near, offset, lodIndex, cellSize);
         localVertexMapping[i] = verts.push(vertex) - 1;
         cacheCell.verts[0] = localVertexMapping[i];
         cacheCell.dirs[0] = 0;
@@ -543,9 +553,12 @@ export class TransvoxelExtractor {
         }
 
         if (!present || localVertexMapping[i] < 0) {
-          const pi = toVector3f(p0).multiplyScalar(t0).add(toVector3f(p1).multiplyScalar(t1));
+          const pi = toVector3f(p0)
+            .multiplyScalar(t0)
+            .add(toVector3f(p1).multiplyScalar(t1))
+            .subtract(blockOriginF);
           const normal = computeNormal(n0, n1, t0, t1);
-          const vertex = createVertex(pi, normal, near, offset, lodIndex);
+          const vertex = createVertex(pi, normal, near, offset, lodIndex, cellSize);
           localVertexMapping[i] = verts.push(vertex) - 1;
         }
       }
@@ -575,7 +588,8 @@ export class TransvoxelExtractor {
     samples: DensityFunction,
     verts: TransvoxelVertex[],
     indices: number[],
-    cache: TransitionCache
+    cache: TransitionCache,
+    blockOrigin: Vector3i
   ): number {
     if (lodIndex < 1) {
       throw new RangeError("Transition cells require lodIndex >= 1.");
@@ -584,13 +598,15 @@ export class TransvoxelExtractor {
     const lodScale = 1 << lodIndex;
     const sampleStep = 1 << (lodIndex - 1);
     const last = 16 * lodScale;
+    const blockOriginF = Vector3f.fromVector3i(blockOrigin);
+    const localOrigin = origin.subtract(blockOrigin);
     let near = 0;
 
     for (let i = 0; i < 3; i++) {
-      if (origin.component(i) === 0) {
+      if (localOrigin.component(i) === 0) {
         near |= 1 << (i * 2);
       }
-      if (origin.component(i) === last) {
+      if (localOrigin.component(i) === last) {
         near |= 1 << (i * 2 + 1);
       }
     }
@@ -701,20 +717,22 @@ export class TransvoxelExtractor {
             samples,
             lowside ? lodIndex : lodIndex - 1
           );
+          const piLocal = pi.subtract(blockOriginF);
 
           let vertex: TransvoxelVertex;
           if (lowside) {
-            const adjusted = setAxisComponent(pi, axis, origin.component(axis));
+            const axisBoundary = origin.component(axis) - blockOrigin.component(axis);
+            const adjusted = setAxisComponent(piLocal, axis, axisBoundary);
             const delta = computeDelta(adjusted, lodIndex, BLOCK_WIDTH);
-            const projected = projectNormal(normal, delta);
+            const projected = projectNormal(normal, delta).multiplyScalar(cellSize);
             vertex = {
               primary: unusedVertexPosition,
-              secondary: offset.add(adjusted).add(projected),
+              secondary: offset.add(adjusted.multiplyScalar(cellSize)).add(projected),
               normal,
               near,
             };
           } else {
-            vertex = createVertex(pi, normal, 0, offset, lodIndex - 1);
+            vertex = createVertex(piLocal, normal, 0, offset, lodIndex - 1, cellSize);
           }
 
           localVertexMapping[i] = verts.push(vertex) - 1;
@@ -740,21 +758,22 @@ export class TransvoxelExtractor {
         }
 
         if (!present || localVertexMapping[i] < 0) {
-          let pi = toVector3f(positions[v]);
+          let pi = toVector3f(positions[v]).subtract(blockOriginF);
           let vertex: TransvoxelVertex;
 
           if (v > 8) {
-            const adjusted = setAxisComponent(pi, axis, origin.component(axis));
+            const axisBoundary = origin.component(axis) - blockOrigin.component(axis);
+            const adjusted = setAxisComponent(pi, axis, axisBoundary);
             const delta = computeDelta(adjusted, lodIndex, BLOCK_WIDTH);
-            const projected = projectNormal(normal, delta);
+            const projected = projectNormal(normal, delta).multiplyScalar(cellSize);
             vertex = {
               primary: unusedVertexPosition,
-              secondary: offset.add(adjusted).add(projected),
+              secondary: offset.add(adjusted.multiplyScalar(cellSize)).add(projected),
               normal,
               near,
             };
           } else {
-            vertex = createVertex(pi, normal, 0, offset, lodIndex - 1);
+            vertex = createVertex(pi, normal, 0, offset, lodIndex - 1, cellSize);
           }
 
           localVertexMapping[i] = verts.push(vertex) - 1;

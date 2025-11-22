@@ -8,6 +8,7 @@ import { RegularCache, TransitionCache } from "../src/surface-extractor/cache";
 import { TransvoxelVertex, getRenderablePosition, unusedVertexPosition } from "../src/surface-extractor/vertex";
 import { Tables } from "../src/lengyel/tables";
 import { buildRegularCaseMesh, buildTransitionCaseMesh } from "./case-fixtures";
+import { MeshData } from "../src/surface-extractor/mesh-data";
 
 const createSphereVolume = (radius = 7, center = 8): DensityFunction => (x, y, z) => {
   const dx = x - center;
@@ -17,12 +18,61 @@ const createSphereVolume = (radius = 7, center = 8): DensityFunction => (x, y, z
   return Math.floor(value);
 };
 
+
+
 type AxisBounds = { x: number; y: number; z: number };
 
 interface SampleBounds {
   min: AxisBounds;
   max: AxisBounds;
 }
+
+const computeMeshBounds = (vertices: TransvoxelVertex[]): SampleBounds => {
+  const min = { x: Infinity, y: Infinity, z: Infinity };
+  const max = { x: -Infinity, y: -Infinity, z: -Infinity };
+
+  for (const vertex of vertices) {
+    const position = getRenderablePosition(vertex);
+    min.x = Math.min(min.x, position.x);
+    min.y = Math.min(min.y, position.y);
+    min.z = Math.min(min.z, position.z);
+    max.x = Math.max(max.x, position.x);
+    max.y = Math.max(max.y, position.y);
+    max.z = Math.max(max.z, position.z);
+  }
+
+  return { min, max };
+};
+
+const triangleArea = (a: Vector3f, b: Vector3f, c: Vector3f): number => {
+  const ab = b.subtract(a);
+  const ac = c.subtract(a);
+  return ab.cross(ac).length() * 0.5;
+};
+
+const hasDegenerateTriangles = (mesh: MeshData, epsilon = 1e-5): boolean => {
+  const { vertices, indices } = mesh;
+  for (let i = 0; i < indices.length; i += 3) {
+    const a = getRenderablePosition(vertices[indices[i]]);
+    const b = getRenderablePosition(vertices[indices[i + 1]]);
+    const c = getRenderablePosition(vertices[indices[i + 2]]);
+    if (triangleArea(a, b, c) <= epsilon) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const expectVerticesNearSurface = (
+  mesh: MeshData,
+  sdf: (position: Vector3f) => number,
+  tolerance: number
+): void => {
+  for (const vertex of mesh.vertices) {
+    const position = getRenderablePosition(vertex);
+    expect(Math.abs(sdf(position))).toBeLessThanOrEqual(tolerance);
+  }
+};
 
 const axisKeyForFace = (face: TransitionFace): keyof AxisBounds => {
   if (face.endsWith("X")) {
@@ -84,6 +134,7 @@ describe("TransvoxelExtractor", () => {
       Vector3i.zero,
       Vector3f.zero,
       Vector3i.zero,
+      Vector3i.zero,
       volume,
       0,
       1,
@@ -112,7 +163,9 @@ describe("TransvoxelExtractor", () => {
   });
 
   it("adds seam data when transition faces are extracted", () => {
-    const volume = createSphereVolume();
+    const planeOffset = 24;
+    const scale = 16;
+    const planeField: DensityFunction = (x, y, z) => Math.floor((x + y + z - planeOffset) * scale);
     const mesher = new TransvoxelMesher();
     const faces: TransitionFace[] = [
       "negativeX",
@@ -123,14 +176,15 @@ describe("TransvoxelExtractor", () => {
       "positiveZ",
     ];
 
-    const regularOnly = mesher.extractRegularBlock(volume, { origin: Vector3i.zero, lodIndex: 1, cellSize: 1 });
-    const withTransitions = mesher.extractBlock(volume, {
+    const regularOnly = mesher.extractRegularBlock(planeField, { origin: Vector3i.zero, lodIndex: 1, cellSize: 1 });
+    const withTransitions = mesher.extractBlock(planeField, {
       origin: Vector3i.zero,
       lodIndex: 1,
       cellSize: 1,
       transitionFaces: faces,
     });
 
+    expect(regularOnly.vertices.length).toBeGreaterThan(0);
     expect(withTransitions.vertices.length).toBeGreaterThan(regularOnly.vertices.length);
     expect(withTransitions.indices.length).toBeGreaterThan(regularOnly.indices.length);
 
@@ -141,8 +195,9 @@ describe("TransvoxelExtractor", () => {
   it("samples transition faces within the block bounds", () => {
     const volume = new RecordingSampler(() => 64);
     const mesher = new TransvoxelMesher();
-    const lodIndex = 1;
-    const extent = TransvoxelExtractor.BlockWidth * (1 << lodIndex);
+    const lodIndex = 2;
+    const lodScale = 1 << lodIndex;
+    const extent = TransvoxelExtractor.BlockWidth * lodScale;
     const margin = 1;
     const faces: TransitionFace[] = [
       "negativeX",
@@ -171,9 +226,11 @@ describe("TransvoxelExtractor", () => {
       expect(max.z).toBeLessThanOrEqual(extent + margin);
 
       const axisKey = axisKeyForFace(face);
-      const axisExpected = directionForFace(face) === -1 ? 0 : extent;
-      expect(min[axisKey]).toBeGreaterThanOrEqual(axisExpected - margin);
-      expect(max[axisKey]).toBeLessThanOrEqual(axisExpected + margin);
+      const direction = directionForFace(face);
+      const axisBoundary = direction === -1 ? 0 : extent;
+
+      expect(min[axisKey]).toBeGreaterThanOrEqual(axisBoundary - (lodScale + margin));
+      expect(max[axisKey]).toBeLessThanOrEqual(axisBoundary + (lodScale + margin));
 
       const center = extent / 2;
       for (const tangential of tangentialAxes[axisKey]) {
@@ -183,8 +240,45 @@ describe("TransvoxelExtractor", () => {
     }
   });
 
+  it("matches the coarse cell depth along the normal axis", () => {
+    const mesher = new TransvoxelMesher();
+    const lodIndex = 2;
+    const lodScale = 1 << lodIndex;
+    const extent = TransvoxelExtractor.BlockWidth * lodScale;
+    const coarseDepth = extent / 2;
+    const margin = 2.5;
+    const volume = createSphereVolume(coarseDepth + 4, extent / 2);
+    const faces: TransitionFace[] = [
+      "negativeX",
+      "positiveX",
+      "negativeY",
+      "positiveY",
+      "negativeZ",
+      "positiveZ",
+    ];
+    for (const face of faces) {
+      const mesh = mesher.extractTransitionFaces(volume, {
+        origin: Vector3i.zero,
+        lodIndex,
+        cellSize: 1,
+        faces: [face],
+      });
+
+      const axisKey = axisKeyForFace(face);
+      expect(mesh.vertices.length).toBeGreaterThan(0);
+      const bounds = computeMeshBounds(mesh.vertices);
+      const direction = directionForFace(face);
+      const axisBoundary = direction === -1 ? 0 : extent;
+
+      expect(bounds.min[axisKey]).toBeLessThanOrEqual(axisBoundary + margin);
+      expect(bounds.max[axisKey]).toBeGreaterThanOrEqual(axisBoundary - margin);
+      expect(bounds.min[axisKey]).toBeGreaterThanOrEqual(axisBoundary - coarseDepth - margin);
+      expect(bounds.max[axisKey]).toBeLessThanOrEqual(axisBoundary + coarseDepth + margin);
+    }
+  });
+
   it("reuses cached vertices along the Z axis", () => {
-    const volume: DensityFunction = (_x, _y, z) => Math.round((z - 0.5) * 127);
+    const volume: DensityFunction = (_x, _y, z) => Math.round(Math.cos(z * Math.PI) * 127);
     const cache = new RegularCache(2);
     const verts: TransvoxelVertex[] = [];
     const indices: number[] = [];
@@ -195,6 +289,7 @@ describe("TransvoxelExtractor", () => {
     TransvoxelExtractor.polygonizeRegularCell(
       Vector3i.zero,
       offset,
+      Vector3i.zero,
       Vector3i.zero,
       volume,
       lodIndex,
@@ -210,6 +305,7 @@ describe("TransvoxelExtractor", () => {
       new Vector3i(0, 0, 1),
       offset,
       new Vector3i(0, 0, 1),
+      Vector3i.zero,
       volume,
       lodIndex,
       cellSize,
@@ -222,16 +318,120 @@ describe("TransvoxelExtractor", () => {
     expect(verts.length).toBe(afterFirstCell + 4);
   });
 
-  it("returns secondary coordinates for renderable positions", () => {
+  it("positions regular block vertices on the planar isosurface", () => {
+    const planeOffset = 24;
+    const scale = 16;
+    const signedDistance = (x: number, y: number, z: number): number => x + y + z - planeOffset;
+    const planeField: DensityFunction = (x, y, z) => Math.floor(signedDistance(x, y, z) * scale);
+    const mesher = new TransvoxelMesher();
+
+    const mesh = mesher.extractRegularBlock(planeField, {
+      origin: Vector3i.zero,
+      lodIndex: 0,
+      cellSize: 1,
+    });
+
+    expect(mesh.vertices.length).toBeGreaterThan(0);
+    expectVerticesNearSurface(mesh, (position) => signedDistance(position.x, position.y, position.z), 0.75);
+  });
+
+  it("places translated regular blocks at the correct world coordinates", () => {
+    const planeOffset = 24;
+    const scale = 16;
+    const signedDistance = (x: number, y: number, z: number): number => x + y + z - planeOffset;
+    const planeField: DensityFunction = (x, y, z) => Math.floor(signedDistance(x, y, z) * scale);
+    const translation = new Vector3i(16, -8, -8);
+    const mesher = new TransvoxelMesher();
+
+    const base = mesher.extractRegularBlock(planeField, {
+      origin: Vector3i.zero,
+      lodIndex: 0,
+      cellSize: 1,
+    });
+    const translated = mesher.extractRegularBlock(planeField, {
+      origin: translation,
+      lodIndex: 0,
+      cellSize: 1,
+    });
+
+    const baseBounds = computeMeshBounds(base.vertices);
+    const translatedBounds = computeMeshBounds(translated.vertices);
+    const translationComponents: AxisBounds = {
+      x: translation.x,
+      y: translation.y,
+      z: translation.z,
+    };
+
+    expect(base.vertices.length).toBeGreaterThan(0);
+    expect(translated.vertices.length).toBeGreaterThan(0);
+
+    (Object.keys(baseBounds.min) as (keyof AxisBounds)[]).forEach((axis) => {
+      expect(Math.abs(translatedBounds.min[axis] - (baseBounds.min[axis] + translationComponents[axis]))).toBeLessThan(0.01);
+      expect(Math.abs(translatedBounds.max[axis] - (baseBounds.max[axis] + translationComponents[axis]))).toBeLessThan(0.01);
+    });
+  });
+
+  it("scales meshes according to the provided cell size", () => {
+    const sphereField = createSphereVolume(7, 24);
+    const mesher = new TransvoxelMesher();
+
+    const unitMesh = mesher.extractRegularBlock(sphereField, {
+      origin: Vector3i.zero,
+      lodIndex: 0,
+      cellSize: 1,
+    });
+
+    const scaledMesh = mesher.extractRegularBlock(sphereField, {
+      origin: Vector3i.zero,
+      lodIndex: 0,
+      cellSize: 2,
+    });
+
+    const unitBounds = computeMeshBounds(unitMesh.vertices);
+    const scaledBounds = computeMeshBounds(scaledMesh.vertices);
+    expect(scaledBounds.min.x).toBeCloseTo(unitBounds.min.x * 2, 5);
+    expect(scaledBounds.max.x).toBeCloseTo(unitBounds.max.x * 2, 5);
+    expect(scaledBounds.min.y).toBeCloseTo(unitBounds.min.y * 2, 5);
+    expect(scaledBounds.max.y).toBeCloseTo(unitBounds.max.y * 2, 5);
+    expect(scaledBounds.min.z).toBeCloseTo(unitBounds.min.z * 2, 5);
+    expect(scaledBounds.max.z).toBeCloseTo(unitBounds.max.z * 2, 5);
+  });
+
+  it("marks translated boundary cells as near", () => {
+    const planeField: DensityFunction = (x, _y, _z) => Math.floor((x - 17) * 16);
+    const mesher = new TransvoxelMesher();
+    const mesh = mesher.extractRegularBlock(planeField, {
+      origin: new Vector3i(16, 0, 0),
+      lodIndex: 0,
+      cellSize: 1,
+    });
+
+    expect(mesh.vertices.length).toBeGreaterThan(0);
+    const hasSecondary = mesh.vertices.some(
+      (vertex) => vertex.near !== 0 && !vertex.secondary.equals(unusedVertexPosition)
+    );
+    expect(hasSecondary).toBe(true);
+  });
+
+  it("prefers secondary coordinates for renderable positions", () => {
     const secondary = new Vector3f(1, 2, 3);
     const vertex: TransvoxelVertex = {
-      primary: unusedVertexPosition,
+      primary: Vector3f.zero,
       secondary,
+      normal: Vector3f.zero,
+      near: 1,
+    };
+
+    expect(getRenderablePosition(vertex)).toBe(secondary);
+
+    const fallback: TransvoxelVertex = {
+      primary: secondary,
+      secondary: unusedVertexPosition,
       normal: Vector3f.zero,
       near: 0,
     };
 
-    expect(getRenderablePosition(vertex)).toBe(secondary);
+    expect(getRenderablePosition(fallback)).toBe(secondary);
   });
 });
 
@@ -248,6 +448,7 @@ describe("Reference case tables", () => {
       expectedTriangles: number;
       actualTriangles: number;
     }> = [];
+    const degenerateCases: number[] = [];
 
     for (let caseCode = 0; caseCode < 256; caseCode++) {
       const mesh = buildRegularCaseMesh(caseCode, regularCache);
@@ -268,6 +469,10 @@ describe("Reference case tables", () => {
           actualTriangles,
         });
       }
+
+      if (mesh.indices.length > 0 && hasDegenerateTriangles(mesh)) {
+        degenerateCases.push(caseCode);
+      }
     }
 
     if (mismatches.length > 0) {
@@ -282,6 +487,7 @@ describe("Reference case tables", () => {
     }
 
     expect(mismatches).toHaveLength(0);
+    expect(degenerateCases).toHaveLength(0);
   });
 
   it("matches every transition case entry", () => {
@@ -294,6 +500,7 @@ describe("Reference case tables", () => {
       expectedTriangles: number;
       actualTriangles: number;
     }> = [];
+    const degenerateCases: number[] = [];
 
     for (let caseCode = 0; caseCode < 512; caseCode++) {
       const mesh = buildTransitionCaseMesh(caseCode, transitionCache);
@@ -317,6 +524,10 @@ describe("Reference case tables", () => {
           actualTriangles,
         });
       }
+
+      if (mesh.indices.length > 0 && hasDegenerateTriangles(mesh)) {
+        degenerateCases.push(caseCode);
+      }
     }
 
     if (mismatches.length > 0) {
@@ -332,5 +543,6 @@ describe("Reference case tables", () => {
     }
 
     expect(mismatches).toHaveLength(0);
+    expect(degenerateCases).toHaveLength(0);
   });
 });

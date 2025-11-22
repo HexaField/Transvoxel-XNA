@@ -106,6 +106,7 @@ export function buildRegularCaseMesh(caseCode: number, cache: RegularCache): Mes
     Vector3i.zero,
     Vector3f.zero,
     Vector3i.zero,
+    Vector3i.zero,
     createRegularCaseSampler(caseCode),
     0,
     1,
@@ -135,7 +136,8 @@ export function buildTransitionCaseMesh(caseCode: number, cache: TransitionCache
     createTransitionCaseSampler(caseCode),
     vertices,
     indices,
-    cache
+    cache,
+    Vector3i.zero
   );
   return new MeshData(vertices, indices);
 }
