@@ -29,6 +29,11 @@ import {
   type TransitionFace,
   type LodLevel,
 } from "./quadChunks";
+import {
+  type ChunkFieldRequest,
+  type ChunkFieldResponse,
+} from "./chunk-field-types";
+import { WebGPUChunkGenerator } from "./webgpu-chunk-generator";
 
 const mount = document.querySelector<HTMLDivElement>("#app");
 if (!mount) {
@@ -161,24 +166,8 @@ const estimateOriginY = (
   return Math.floor(estimatedSurface - verticalPadding);
 };
 
-type ChunkWorkerRequest = {
-  key: string;
-  lodIndex: number;
-  chunkX: number;
-  chunkZ: number;
-  originY: number;
-  requestId: number;
-};
-
-type ChunkWorkerResponse = {
-  key: string;
-  minX: number;
-  minY: number;
-  minZ: number;
-  size: number;
-  buffer: ArrayBuffer;
-  requestId: number;
-};
+type ChunkWorkerRequest = ChunkFieldRequest;
+type ChunkWorkerResponse = ChunkFieldResponse;
 
 interface ChunkRecord {
   mesh: Mesh;
@@ -198,7 +187,13 @@ interface PendingChunkRequest {
 }
 
 const mesher = new TransvoxelMesher();
-const chunkWorker: Worker = createChunkWorker();
+const chunkFieldGenerator = WebGPUChunkGenerator.isSupported()
+  ? new WebGPUChunkGenerator(BLOCK_WIDTH)
+  : null;
+let chunkWorker: Worker | null = chunkFieldGenerator
+  ? null
+  : createChunkWorker();
+let suppressGpuPath = false;
 const activeChunks = new Map<string, ChunkRecord>();
 const stagedChunks = new Map<string, ChunkRecord>();
 const pendingBuilds = new Map<string, PendingChunkRequest>();
@@ -213,9 +208,23 @@ const chunkScheduler = new QuadChunkManager({
   estimateOriginY,
 });
 
-chunkWorker.onmessage = (event: MessageEvent<ChunkWorkerResponse>) => {
-  handleWorkerMessage(event.data as ChunkWorkerResponse);
+const attachWorkerHandler = (worker: Worker): void => {
+  worker.onmessage = (event: MessageEvent<ChunkWorkerResponse>) => {
+    handleWorkerMessage(event.data as ChunkWorkerResponse);
+  };
 };
+
+const ensureChunkWorker = (): Worker => {
+  if (!chunkWorker) {
+    chunkWorker = createChunkWorker();
+    attachWorkerHandler(chunkWorker);
+  }
+  return chunkWorker;
+};
+
+if (chunkWorker) {
+  attachWorkerHandler(chunkWorker);
+}
 
 function updateTerrain(cameraPosition: Vector3): void {
   currentCameraXZ.x = cameraPosition.x;
@@ -301,8 +310,24 @@ function dispatchBuilds(): void {
       originY: request.descriptor.originY,
       requestId: request.requestId,
     };
-    chunkWorker.postMessage(workerRequest);
     inflightBuilds++;
+    if (chunkFieldGenerator && !suppressGpuPath) {
+      chunkFieldGenerator
+        .generateChunkData(workerRequest)
+        .then((response) => handleWorkerMessage(response))
+        .catch((error) => {
+          console.error(
+            "WebGPU chunk generation failed; falling back to worker",
+            error
+          );
+          suppressGpuPath = true;
+          const worker = ensureChunkWorker();
+          worker.postMessage(workerRequest);
+        });
+    } else {
+      const worker = ensureChunkWorker();
+      worker.postMessage(workerRequest);
+    }
   }
 }
 
