@@ -11,7 +11,10 @@ import {
 } from "three";
 import type { Vector3 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { TransvoxelExtractor, TransvoxelMesher } from "../src/surface-extractor/transvoxel-extractor";
+import {
+  TransvoxelExtractor,
+  TransvoxelMesher,
+} from "../src/surface-extractor/transvoxel-extractor";
 import { Vector3i } from "../src/math/vector3i";
 import { meshDataToGeometry } from "./mesh-utils";
 import {
@@ -69,19 +72,28 @@ scene.add(rimLight);
 
 const BLOCK_WIDTH = TransvoxelExtractor.BlockWidth;
 const CELL_SIZE = 1;
-const LOD_LEVELS: LodLevel[] = [
-  { lodIndex: 0, color: 0xff0000, maxDistance: 48 }, // red - fine detail
-  { lodIndex: 1, color: 0x00ff00, maxDistance: 120 }, // green - medium detail
-  { lodIndex: 2, color: 0x6666ff, maxDistance: 360 }, // blue - coarse detail
-];
-
-const MAX_LOD_INDEX = LOD_LEVELS[LOD_LEVELS.length - 1].lodIndex;
-const LOD_LOOKUP = new Map(LOD_LEVELS.map((level) => [level.lodIndex, level]));
+const VERTEX_DENSITY_RATIO = 5;
 
 const chunkWorldSize = (lodIndex: number): number =>
   CELL_SIZE * (BLOCK_WIDTH << lodIndex);
 const chunkDiagonalRadius = (lodIndex: number): number =>
   (chunkWorldSize(lodIndex) * Math.SQRT2) / 2;
+
+const deriveLodLevels = (): LodLevel[] => {
+  const entries = [
+    { lodIndex: 0, color: 0xff0000 },
+    { lodIndex: 1, color: 0x00ff00 },
+    { lodIndex: 2, color: 0x6666ff },
+  ];
+  return entries.map((entry) => ({
+    ...entry,
+    maxDistance: chunkWorldSize(entry.lodIndex) * VERTEX_DENSITY_RATIO,
+  }));
+};
+
+const LOD_LEVELS: LodLevel[] = deriveLodLevels();
+const MAX_LOD_INDEX = LOD_LEVELS[LOD_LEVELS.length - 1].lodIndex;
+const LOD_LOOKUP = new Map(LOD_LEVELS.map((level) => [level.lodIndex, level]));
 const chunkKey = (lodIndex: number, chunkX: number, chunkZ: number): string =>
   `${lodIndex}:${chunkX}:${chunkZ}`;
 
@@ -185,7 +197,6 @@ interface PendingChunkRequest {
   requestId: number;
 }
 
-
 const mesher = new TransvoxelMesher();
 const chunkWorker: Worker = createChunkWorker();
 const activeChunks = new Map<string, ChunkRecord>();
@@ -260,8 +271,7 @@ function reorderBuildQueue(): void {
     if (lodDiff !== 0) {
       return lodDiff;
     }
-    const distanceDiff =
-      chunkRequestDistance(a) - chunkRequestDistance(b);
+    const distanceDiff = chunkRequestDistance(a) - chunkRequestDistance(b);
     if (distanceDiff !== 0) {
       return distanceDiff;
     }

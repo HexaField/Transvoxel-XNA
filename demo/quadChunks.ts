@@ -7,8 +7,10 @@ export type TransitionFace =
 export interface LodLevel {
   lodIndex: number;
   color: number;
-  maxDistance: number;
+  maxDistance?: number;
 }
+
+type DerivedLodLevel = LodLevel & { maxDistance: number };
 
 export interface Vector2Like {
   x: number;
@@ -19,6 +21,7 @@ export interface QuadChunkConfig {
   blockWidth: number;
   cellSize: number;
   lodLevels: LodLevel[];
+  lodDistanceMultiplier?: number;
   estimateOriginY: (lodIndex: number, chunkX: number, chunkZ: number) => number;
 }
 
@@ -65,7 +68,9 @@ interface PendingRequest {
 
 export class QuadChunkManager {
   private readonly maxLodIndex: number;
-  private readonly lodLookup: Map<number, LodLevel>;
+  private readonly lodLookup: Map<number, DerivedLodLevel>;
+  private readonly derivedLodLevels: DerivedLodLevel[];
+  private readonly lodDistanceMultiplier: number;
   private lastCameraPosition: Vector2Like | null = null;
   private desiredChunkKeys = new Set<string>();
   private nextRequestId = 1;
@@ -79,9 +84,19 @@ export class QuadChunkManager {
     if (config.lodLevels.length === 0) {
       throw new Error("At least one LOD level is required");
     }
-    this.maxLodIndex = config.lodLevels[config.lodLevels.length - 1].lodIndex;
+    this.lodDistanceMultiplier = config.lodDistanceMultiplier ?? 1.5;
+    this.derivedLodLevels = config.lodLevels
+      .map((level) => ({
+        ...level,
+        maxDistance:
+          level.maxDistance ??
+          this.chunkWorldSize(level.lodIndex) * this.lodDistanceMultiplier,
+      }))
+      .sort((a, b) => a.lodIndex - b.lodIndex);
+    this.maxLodIndex =
+      this.derivedLodLevels[this.derivedLodLevels.length - 1].lodIndex;
     this.lodLookup = new Map(
-      config.lodLevels.map((level) => [level.lodIndex, level])
+      this.derivedLodLevels.map((level) => [level.lodIndex, level])
     );
   }
 
@@ -249,7 +264,7 @@ export class QuadChunkManager {
 
     const coarseSize = this.chunkWorldSize(this.maxLodIndex);
     const farthestLevel =
-      this.config.lodLevels[this.config.lodLevels.length - 1];
+      this.derivedLodLevels[this.derivedLodLevels.length - 1];
     const movementThreshold = Math.max(
       coarseSize * 2,
       farthestLevel.maxDistance * 0.5
@@ -337,11 +352,9 @@ export class QuadChunkManager {
 
   private buildInitialNodes(cameraPosition: Vector2Like): QuadNode[] {
     const coarseSize = this.chunkWorldSize(this.maxLodIndex);
-    const radiusChunks =
-      Math.ceil(
-        this.config.lodLevels[this.config.lodLevels.length - 1].maxDistance /
-          coarseSize
-      ) + 2;
+    const farthest =
+      this.derivedLodLevels[this.derivedLodLevels.length - 1];
+    const radiusChunks = Math.ceil(farthest.maxDistance / coarseSize) + 2;
     const baseX = Math.floor(cameraPosition.x / coarseSize);
     const baseZ = Math.floor(cameraPosition.z / coarseSize);
     const nodes = this.generateSpiralOrder(baseX, baseZ, radiusChunks).map(
@@ -436,7 +449,7 @@ export class QuadChunkManager {
   }
 
   private desiredLodForDistance(distance: number): number {
-    for (const level of this.config.lodLevels) {
+    for (const level of this.derivedLodLevels) {
       if (distance <= level.maxDistance) {
         return level.lodIndex;
       }
@@ -728,7 +741,8 @@ export class QuadChunkManager {
   }
 
   private teleportThreshold(): number {
-    const farthest = this.config.lodLevels[this.config.lodLevels.length - 1];
+    const farthest =
+      this.derivedLodLevels[this.derivedLodLevels.length - 1];
     const coarseSpan = this.chunkWorldSize(this.maxLodIndex) * 4;
     return Math.max(farthest.maxDistance * 2, coarseSpan);
   }

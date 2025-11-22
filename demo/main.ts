@@ -102,16 +102,22 @@ const transitionFaces: TransitionFace[] = [
   "positiveZ",
 ];
 
+const CELL_SIZE = 1;
+const VERTEX_DENSITY_RATIO = 1.5;
+const chunkWorldSize = (lodIndex: number): number =>
+  CELL_SIZE * (BLOCK_WIDTH << lodIndex);
+const deriveLodDistance = (lodIndex: number): number =>
+  chunkWorldSize(lodIndex) * VERTEX_DENSITY_RATIO;
+
 interface LodLevel {
   lodIndex: number;
   maxDistance: number;
 }
 
-const LOD_LEVELS: LodLevel[] = [
-  { lodIndex: 0, maxDistance: 48 },
-  { lodIndex: 1, maxDistance: 120 },
-  { lodIndex: 2, maxDistance: 260 },
-];
+const LOD_LEVELS: LodLevel[] = [0, 1, 2].map((lodIndex) => ({
+  lodIndex,
+  maxDistance: deriveLodDistance(lodIndex),
+}));
 
 interface DemoSettings {
   volumeScale: number;
