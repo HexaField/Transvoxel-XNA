@@ -371,6 +371,32 @@ describe("TransvoxelExtractor", () => {
     });
   });
 
+  it("aligns adjacent coarse LOD blocks", () => {
+    const mesher = new TransvoxelMesher();
+    const lodIndex = 1;
+    const chunkSize = TransvoxelExtractor.BlockWidth << lodIndex;
+    const sphereField = createSphereVolume(chunkSize, chunkSize);
+
+    const base = mesher.extractRegularBlock(sphereField, {
+      origin: Vector3i.zero,
+      lodIndex,
+      cellSize: 1,
+    });
+    const neighbor = mesher.extractRegularBlock(sphereField, {
+      origin: new Vector3i(chunkSize, 0, 0),
+      lodIndex,
+      cellSize: 1,
+    });
+
+    const baseBounds = computeMeshBounds(base.vertices);
+    const neighborBounds = computeMeshBounds(neighbor.vertices);
+
+    expect(base.vertices.length).toBeGreaterThan(0);
+    expect(neighbor.vertices.length).toBeGreaterThan(0);
+    expect(Math.abs(neighborBounds.min.x - (baseBounds.min.x + chunkSize))).toBeLessThan(0.01);
+    expect(Math.abs(neighborBounds.max.x - (baseBounds.max.x + chunkSize))).toBeLessThan(0.01);
+  });
+
   it("scales meshes according to the provided cell size", () => {
     const sphereField = createSphereVolume(7, 24);
     const mesher = new TransvoxelMesher();
@@ -413,25 +439,35 @@ describe("TransvoxelExtractor", () => {
     expect(hasSecondary).toBe(true);
   });
 
-  it("prefers secondary coordinates for renderable positions", () => {
+  it("falls back to secondary coordinates only when primary is unused", () => {
+    const primary = new Vector3f(4, 5, 6);
     const secondary = new Vector3f(1, 2, 3);
-    const vertex: TransvoxelVertex = {
-      primary: Vector3f.zero,
+    const regularVertex: TransvoxelVertex = {
+      primary,
       secondary,
       normal: Vector3f.zero,
       near: 1,
     };
 
-    expect(getRenderablePosition(vertex)).toBe(secondary);
+    expect(getRenderablePosition(regularVertex)).toBe(primary);
+
+    const transitionVertex: TransvoxelVertex = {
+      primary: unusedVertexPosition,
+      secondary,
+      normal: Vector3f.zero,
+      near: 1,
+    };
+
+    expect(getRenderablePosition(transitionVertex)).toBe(secondary);
 
     const fallback: TransvoxelVertex = {
-      primary: secondary,
+      primary,
       secondary: unusedVertexPosition,
       normal: Vector3f.zero,
       near: 0,
     };
 
-    expect(getRenderablePosition(fallback)).toBe(secondary);
+    expect(getRenderablePosition(fallback)).toBe(primary);
   });
 });
 

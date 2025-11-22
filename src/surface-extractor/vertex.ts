@@ -10,4 +10,4 @@ export interface TransvoxelVertex {
 export const unusedVertexPosition = new Vector3f(1000, 1000, 1000);
 
 export const getRenderablePosition = (vertex: TransvoxelVertex): Vector3f =>
-  vertex.secondary === unusedVertexPosition ? vertex.primary : vertex.secondary;
+  vertex.primary === unusedVertexPosition ? vertex.secondary : vertex.primary;
