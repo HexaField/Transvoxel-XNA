@@ -1,3 +1,5 @@
+export type DensityGeneratorId = "terrain" | "plateaus" | "spheres";
+
 export type ChunkFieldRequest = {
   key: string;
   lodIndex: number;
@@ -5,6 +7,8 @@ export type ChunkFieldRequest = {
   chunkZ: number;
   originY: number;
   requestId: number;
+  generatorId: DensityGeneratorId;
+  generatorToken: number;
 };
 
 export type ChunkFieldResponse = {
@@ -15,4 +19,6 @@ export type ChunkFieldResponse = {
   size: number;
   buffer: ArrayBuffer;
   requestId: number;
+  generatorId: DensityGeneratorId;
+  generatorToken: number;
 };

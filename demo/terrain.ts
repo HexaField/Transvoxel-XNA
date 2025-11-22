@@ -3,10 +3,15 @@ import {
   Color,
   DirectionalLight,
   FogExp2,
+  Group,
+  InstancedMesh,
   Mesh,
+  MeshBasicMaterial,
   MeshStandardMaterial,
+  Object3D,
   PerspectiveCamera,
   Scene,
+  SphereGeometry,
   WebGLRenderer,
 } from "three";
 import type { Vector3 } from "three";
@@ -32,6 +37,7 @@ import {
 import {
   type ChunkFieldRequest,
   type ChunkFieldResponse,
+  type DensityGeneratorId,
 } from "./chunk-field-types";
 import { WebGPUChunkGenerator } from "./webgpu-chunk-generator";
 
@@ -41,6 +47,14 @@ if (!mount) {
 }
 
 const statsLabel = document.querySelector<HTMLParagraphElement>("#chunk-stats");
+const generatorStatusLabel =
+  document.querySelector<HTMLSpanElement>("#generator-status");
+const generatorControlsRoot = document.querySelector<HTMLDivElement>(
+  "#generator-controls"
+);
+const generatorButtons = new Map<DensityGeneratorId, HTMLButtonElement>();
+const densityToggle =
+  document.querySelector<HTMLInputElement>("#toggle-density");
 
 const scene = new Scene();
 scene.background = new Color("#03050c");
@@ -75,9 +89,30 @@ const rimLight = new DirectionalLight(0x5bc0ff, 0.3);
 rimLight.position.set(-80, 60, -100);
 scene.add(rimLight);
 
+const densityGroup = new Group();
+densityGroup.visible = false;
+scene.add(densityGroup);
+
 const BLOCK_WIDTH = TransvoxelExtractor.BlockWidth;
 const CELL_SIZE = 1;
 const VERTEX_DENSITY_RATIO = 5;
+const SURFACE_HEADROOM = 3; // accounts for high-frequency strata offset in density field
+const DENSITY_SAMPLE_STRIDE_BASE = 2;
+
+const densitySphereGeometry = new SphereGeometry(0.35, 6, 6);
+const densitySphereMaterial = new MeshBasicMaterial({
+  color: new Color("#ffffff"),
+  transparent: true,
+  opacity: 0.7,
+  depthWrite: false,
+  vertexColors: false,
+  toneMapped: false,
+});
+const densityColorPositive = new Color("#7ad9ff");
+const densityColorNegative = new Color("#ff8c8c");
+const densityColorNeutral = new Color("#7b7b7b");
+const densityColorScratch = new Color();
+const densityTransformScratch = new Object3D();
 
 const chunkWorldSize = (lodIndex: number): number =>
   CELL_SIZE * (BLOCK_WIDTH << lodIndex);
@@ -101,6 +136,19 @@ const MAX_LOD_INDEX = LOD_LEVELS[LOD_LEVELS.length - 1].lodIndex;
 const LOD_LOOKUP = new Map(LOD_LEVELS.map((level) => [level.lodIndex, level]));
 const chunkKey = (lodIndex: number, chunkX: number, chunkZ: number): string =>
   `${lodIndex}:${chunkX}:${chunkZ}`;
+
+interface DensityGenerator {
+  id: DensityGeneratorId;
+  label: string;
+  supportsGpu: boolean;
+  headroom: number;
+  estimateSurfaceHeight: (x: number, z: number) => number;
+}
+
+interface ScheduledChunkRequest extends ChunkRequest {
+  generatorId: DensityGeneratorId;
+  generatorToken: number;
+}
 
 const lerp01 = (a: number, b: number, t: number): number => a + (b - a) * t;
 const smoothstep01 = (t: number): number => t * t * (3 - 2 * t);
@@ -153,7 +201,59 @@ const terrainHeightEstimate = (x: number, z: number): number => {
   return 8 + hills + ridges + dunes;
 };
 
-const estimateOriginY = (
+const PLATEAU_BASE_HEIGHT = 20;
+const PLATEAU_SIN_FREQ_X = 0.025;
+const PLATEAU_SIN_FREQ_Z = 0.03;
+const PLATEAU_SIN_AMPLITUDE = 6;
+const plateauHeightEstimate = (x: number, z: number): number =>
+  PLATEAU_BASE_HEIGHT +
+  Math.sin(x * PLATEAU_SIN_FREQ_X) * PLATEAU_SIN_AMPLITUDE +
+  Math.cos(z * PLATEAU_SIN_FREQ_Z) * PLATEAU_SIN_AMPLITUDE;
+
+const FLOATING_SPHERE_SPACING = 42;
+const FLOATING_SPHERE_RADIUS = 14;
+const FLOATING_SPHERE_BASE_HEIGHT = 32;
+const FLOATING_SPHERE_SWAY_AMPLITUDE = 6;
+const FLOATING_SPHERE_SWAY_FREQUENCY = 0.02;
+
+const floatingSphereCenterY = (x: number, z: number): number =>
+  FLOATING_SPHERE_BASE_HEIGHT +
+  Math.sin((x + z) * FLOATING_SPHERE_SWAY_FREQUENCY) *
+    FLOATING_SPHERE_SWAY_AMPLITUDE;
+
+const floatingSphereSurfaceEstimate = (x: number, z: number): number =>
+  floatingSphereCenterY(x, z) + FLOATING_SPHERE_RADIUS;
+
+const DENSITY_GENERATORS: DensityGenerator[] = [
+  {
+    id: "terrain",
+    label: "Procedural Terrain",
+    supportsGpu: true,
+    headroom: SURFACE_HEADROOM,
+    estimateSurfaceHeight: terrainHeightEstimate,
+  },
+  {
+    id: "plateaus",
+    label: "Rippled Plateau",
+    supportsGpu: false,
+    headroom: 4,
+    estimateSurfaceHeight: plateauHeightEstimate,
+  },
+  {
+    id: "spheres",
+    label: "Floating Spheres",
+    supportsGpu: false,
+    headroom: 2,
+    estimateSurfaceHeight: floatingSphereSurfaceEstimate,
+  },
+];
+
+const generatorLookup = new Map(
+  DENSITY_GENERATORS.map((generator) => [generator.id, generator])
+);
+
+const computeChunkOrigin = (
+  generator: DensityGenerator,
   lodIndex: number,
   chunkX: number,
   chunkZ: number
@@ -161,10 +261,24 @@ const estimateOriginY = (
   const chunkSize = BLOCK_WIDTH << lodIndex;
   const centerX = (chunkX + 0.5) * chunkSize;
   const centerZ = (chunkZ + 0.5) * chunkSize;
-  const estimatedSurface = terrainHeightEstimate(centerX, centerZ);
+  const estimatedSurface =
+    generator.estimateSurfaceHeight(centerX, centerZ) + generator.headroom;
   const verticalPadding = Math.max(16, chunkSize * 0.75);
   return Math.floor(estimatedSurface - verticalPadding);
 };
+
+let activeGenerator: DensityGenerator = DENSITY_GENERATORS[0];
+let generatorToken = 0;
+let densityVisualizationEnabled = false;
+
+const createChunkScheduler = (): QuadChunkManager =>
+  new QuadChunkManager({
+    blockWidth: BLOCK_WIDTH,
+    cellSize: CELL_SIZE,
+    lodLevels: LOD_LEVELS,
+    estimateOriginY: (lodIndex, chunkX, chunkZ) =>
+      computeChunkOrigin(activeGenerator, lodIndex, chunkX, chunkZ),
+  });
 
 type ChunkWorkerRequest = ChunkFieldRequest;
 type ChunkWorkerResponse = ChunkFieldResponse;
@@ -179,11 +293,16 @@ interface ChunkRecord {
   chunkZ: number;
   color: number;
   originY: number;
+  generatorId: DensityGeneratorId;
+  descriptor: ChunkDescriptor;
+  densityMesh?: InstancedMesh;
 }
 
 interface PendingChunkRequest {
   descriptor: ChunkDescriptor;
   requestId: number;
+  generatorId: DensityGeneratorId;
+  generatorToken: number;
 }
 
 const mesher = new TransvoxelMesher();
@@ -197,16 +316,11 @@ let suppressGpuPath = false;
 const activeChunks = new Map<string, ChunkRecord>();
 const stagedChunks = new Map<string, ChunkRecord>();
 const pendingBuilds = new Map<string, PendingChunkRequest>();
-const buildQueue: ChunkRequest[] = [];
+const buildQueue: ScheduledChunkRequest[] = [];
 let inflightBuilds = 0;
 const MAX_INFLIGHT_BUILDS = 1;
 const currentCameraXZ = { x: 0, z: 0 };
-const chunkScheduler = new QuadChunkManager({
-  blockWidth: BLOCK_WIDTH,
-  cellSize: CELL_SIZE,
-  lodLevels: LOD_LEVELS,
-  estimateOriginY,
-});
+let chunkScheduler = createChunkScheduler();
 
 const attachWorkerHandler = (worker: Worker): void => {
   worker.onmessage = (event: MessageEvent<ChunkWorkerResponse>) => {
@@ -225,6 +339,61 @@ const ensureChunkWorker = (): Worker => {
 if (chunkWorker) {
   attachWorkerHandler(chunkWorker);
 }
+
+const setupGeneratorControls = (): void => {
+  if (!generatorControlsRoot) {
+    updateGeneratorUI();
+    return;
+  }
+
+  generatorControlsRoot.replaceChildren();
+  generatorButtons.clear();
+  DENSITY_GENERATORS.forEach((generator) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "generator-button";
+    button.textContent = generator.label;
+    button.addEventListener("click", () => setActiveGenerator(generator.id));
+    generatorControlsRoot.appendChild(button);
+    generatorButtons.set(generator.id, button);
+  });
+
+  updateGeneratorUI();
+};
+
+const updateGeneratorUI = (): void => {
+  generatorButtons.forEach((button, id) => {
+    button.classList.toggle("is-active", id === activeGenerator.id);
+  });
+  if (generatorStatusLabel) {
+    generatorStatusLabel.textContent = activeGenerator.label;
+  }
+};
+
+const resetTerrainState = (): void => {
+  activeChunks.forEach((record) => releaseChunkResources(record));
+  activeChunks.clear();
+  stagedChunks.forEach((record) => releaseChunkResources(record));
+  stagedChunks.clear();
+  pendingBuilds.clear();
+  buildQueue.length = 0;
+  inflightBuilds = 0;
+  densityGroup.clear();
+  updateTerrainStats();
+};
+
+const setActiveGenerator = (generatorId: DensityGeneratorId): void => {
+  const next = generatorLookup.get(generatorId);
+  if (!next || next.id === activeGenerator.id) {
+    return;
+  }
+  activeGenerator = next;
+  generatorToken++;
+  chunkScheduler = createChunkScheduler();
+  resetTerrainState();
+  updateGeneratorUI();
+  updateTerrain(controls.target);
+};
 
 function updateTerrain(cameraPosition: Vector3): void {
   currentCameraXZ.x = cameraPosition.x;
@@ -264,7 +433,13 @@ function enqueueBuildRequest(request: ChunkRequest): void {
     return;
   }
   removeFromBuildQueue(key);
-  buildQueue.push(request);
+  const scheduled: ScheduledChunkRequest = {
+    descriptor: request.descriptor,
+    requestId: request.requestId,
+    generatorId: activeGenerator.id,
+    generatorToken,
+  };
+  buildQueue.push(scheduled);
 }
 
 function removeFromBuildQueue(key: string): void {
@@ -301,6 +476,8 @@ function dispatchBuilds(): void {
     pendingBuilds.set(request.descriptor.key, {
       descriptor: request.descriptor,
       requestId: request.requestId,
+      generatorId: request.generatorId,
+      generatorToken: request.generatorToken,
     });
     const workerRequest: ChunkWorkerRequest = {
       key: request.descriptor.key,
@@ -309,9 +486,15 @@ function dispatchBuilds(): void {
       chunkZ: request.descriptor.chunkZ,
       originY: request.descriptor.originY,
       requestId: request.requestId,
+      generatorId: request.generatorId,
+      generatorToken: request.generatorToken,
     };
     inflightBuilds++;
-    if (chunkFieldGenerator && !suppressGpuPath) {
+    const canUseGpu =
+      chunkFieldGenerator &&
+      !suppressGpuPath &&
+      chunkFieldGenerator.supportsGenerator(request.generatorId);
+    if (canUseGpu) {
       chunkFieldGenerator
         .generateChunkData(workerRequest)
         .then((response) => handleWorkerMessage(response))
@@ -334,13 +517,23 @@ function dispatchBuilds(): void {
 function handleWorkerMessage(message: ChunkWorkerResponse): void {
   const pending = pendingBuilds.get(message.key);
   pendingBuilds.delete(message.key);
-  if (inflightBuilds > 0) {
+  if (
+    pending &&
+    pending.generatorToken === message.generatorToken &&
+    inflightBuilds > 0
+  ) {
+    inflightBuilds--;
+  } else if (!pending && inflightBuilds > 0) {
     inflightBuilds--;
   }
   dispatchBuilds();
   updateTerrainStats();
 
-  if (!pending || pending.requestId !== message.requestId) {
+  if (
+    !pending ||
+    pending.requestId !== message.requestId ||
+    pending.generatorToken !== message.generatorToken
+  ) {
     return;
   }
 
@@ -353,7 +546,7 @@ function handleWorkerMessage(message: ChunkWorkerResponse): void {
   });
 
   const descriptor = pending.descriptor;
-  const record = buildChunkRecord(descriptor, sampler);
+  const record = buildChunkRecord(descriptor, sampler, pending.generatorId);
   const outcome = record ? "mesh" : "empty";
 
   if (record) {
@@ -370,7 +563,8 @@ function handleWorkerMessage(message: ChunkWorkerResponse): void {
 
 function buildChunkRecord(
   descriptor: ChunkDescriptor,
-  sampler: DensityFunction
+  sampler: DensityFunction,
+  generatorId: DensityGeneratorId
 ): ChunkRecord | null {
   const cellScale = 1 << descriptor.lodIndex;
   const samplesPerAxis = BLOCK_WIDTH * cellScale;
@@ -412,12 +606,15 @@ function buildChunkRecord(
     chunkZ: descriptor.chunkZ,
     color: descriptor.color,
     originY: descriptor.originY,
+    generatorId,
+    descriptor,
   };
 }
 
 function addChunkToScene(record: ChunkRecord): void {
   scene.add(record.mesh);
   activeChunks.set(record.key, record);
+  refreshDensityForRecord(record);
 }
 
 function disposeChunk(key: string): void {
@@ -434,6 +631,10 @@ function releaseChunkResources(record: ChunkRecord): void {
   scene.remove(record.mesh);
   record.mesh.geometry.dispose();
   record.material.dispose();
+  if (record.densityMesh) {
+    densityGroup.remove(record.densityMesh);
+    record.densityMesh = undefined;
+  }
 }
 
 function stageChunkRecord(record: ChunkRecord): void {
@@ -528,8 +729,161 @@ function childKeysForParent(parent: {
 function updateTerrainStats(): void {
   if (statsLabel) {
     const building = pendingBuilds.size + buildQueue.length;
-    statsLabel.textContent = `${activeChunks.size} active chunks (${building} building)`;
+    statsLabel.textContent = `${activeChunks.size} active chunks (${building} building) | ${activeGenerator.label}`;
   }
+}
+
+const setDensityVisualizationEnabled = (enabled: boolean): void => {
+  densityVisualizationEnabled = enabled;
+  densityGroup.visible = enabled;
+  if (densityToggle && densityToggle.checked !== enabled) {
+    densityToggle.checked = enabled;
+  }
+  if (!enabled) {
+    activeChunks.forEach((record) => {
+      if (record.densityMesh) {
+        densityGroup.remove(record.densityMesh);
+        record.densityMesh = undefined;
+      }
+    });
+    return;
+  }
+  activeChunks.forEach((record) => refreshDensityForRecord(record));
+};
+
+const refreshDensityForRecord = (record: ChunkRecord): void => {
+  if (!densityVisualizationEnabled) {
+    if (record.densityMesh) {
+      densityGroup.remove(record.densityMesh);
+      record.densityMesh = undefined;
+    }
+    return;
+  }
+  if (!record.densityMesh) {
+    const sampler = densitySamplerFor(record.generatorId);
+    const mesh = buildDensityVisualizationMesh(record.descriptor, sampler);
+    if (mesh) {
+      record.densityMesh = mesh;
+    }
+  }
+  if (record.densityMesh && record.densityMesh.parent !== densityGroup) {
+    densityGroup.add(record.densityMesh);
+  }
+};
+
+const buildDensityVisualizationMesh = (
+  descriptor: ChunkDescriptor,
+  sampler: DensityFunction
+): InstancedMesh | null => {
+  if (!densityVisualizationEnabled) {
+    return null;
+  }
+  const cellScale = 1 << descriptor.lodIndex;
+  const samplesPerAxis = BLOCK_WIDTH * cellScale;
+  const stride = Math.max(DENSITY_SAMPLE_STRIDE_BASE, cellScale);
+  const originX = descriptor.chunkX * samplesPerAxis;
+  const originY = descriptor.originY;
+  const originZ = descriptor.chunkZ * samplesPerAxis;
+  const samples: Array<{ x: number; y: number; z: number; density: number }> =
+    [];
+  for (let z = 0; z <= samplesPerAxis; z += stride) {
+    const worldZ = originZ + z;
+    for (let y = 0; y <= samplesPerAxis; y += stride) {
+      const worldY = originY + y;
+      for (let x = 0; x <= samplesPerAxis; x += stride) {
+        const worldX = originX + x;
+        const density = sampler(worldX, worldY, worldZ);
+        samples.push({ x: worldX, y: worldY, z: worldZ, density });
+      }
+    }
+  }
+  if (samples.length === 0) {
+    return null;
+  }
+  const mesh = new InstancedMesh(
+    densitySphereGeometry,
+    densitySphereMaterial,
+    samples.length
+  );
+  samples.forEach((sample, index) => {
+    densityTransformScratch.position.set(
+      sample.x * CELL_SIZE,
+      sample.y * CELL_SIZE,
+      sample.z * CELL_SIZE
+    );
+    const scale = densityScaleForValue(sample.density);
+    densityTransformScratch.scale.setScalar(scale);
+    densityTransformScratch.updateMatrix();
+    mesh.setMatrixAt(index, densityTransformScratch.matrix);
+    mesh.setColorAt(index, densityColorForValue(sample.density));
+  });
+  mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) {
+    mesh.instanceColor.needsUpdate = true;
+  }
+  return mesh;
+};
+
+const densityScaleForValue = (value: number): number => {
+  const normalized = Math.min(1, Math.abs(value) / 80);
+  return 0.08 + normalized * 0.35;
+};
+
+const densityColorForValue = (value: number): Color => {
+  const strength = Math.min(1, Math.abs(value) / 80);
+  const target = value >= 0 ? densityColorPositive : densityColorNegative;
+  return densityColorScratch.copy(densityColorNeutral).lerp(target, strength);
+};
+
+const clampDensity = (value: number): number =>
+  Math.max(-127, Math.min(127, Math.floor(value)));
+
+const sampleTerrainDensityValue: DensityFunction = (x, y, z) => {
+  const height = terrainHeightEstimate(x, z);
+  const strata = Math.sin((x + z) * 0.05) * 2.5;
+  return clampDensity((height + strata - y) * 6);
+};
+
+const samplePlateauDensityValue: DensityFunction = (x, y, z) => {
+  const height = plateauHeightEstimate(x, z);
+  return clampDensity((height - y) * 12);
+};
+
+const nearestSphereCenter = (value: number): number =>
+  Math.round(value / FLOATING_SPHERE_SPACING) * FLOATING_SPHERE_SPACING;
+
+const sampleFloatingSpheresDensityValue: DensityFunction = (x, y, z) => {
+  const centerX = nearestSphereCenter(x);
+  const centerZ = nearestSphereCenter(z);
+  const centerY = floatingSphereCenterY(centerX, centerZ);
+  const dx = x - centerX;
+  const dy = y - centerY;
+  const dz = z - centerZ;
+  const dist = Math.hypot(dx, dy, dz);
+  return clampDensity((FLOATING_SPHERE_RADIUS - dist) * 12);
+};
+
+const densitySamplerFor = (
+  generatorId: DensityGeneratorId
+): DensityFunction => {
+  switch (generatorId) {
+    case "plateaus":
+      return samplePlateauDensityValue;
+    case "spheres":
+      return sampleFloatingSpheresDensityValue;
+    default:
+      return sampleTerrainDensityValue;
+  }
+};
+
+setupGeneratorControls();
+if (densityToggle) {
+  densityToggle.addEventListener("change", () =>
+    setDensityVisualizationEnabled(densityToggle.checked)
+  );
+  setDensityVisualizationEnabled(densityToggle.checked);
+} else {
+  setDensityVisualizationEnabled(false);
 }
 
 function transitionSignature(faces: TransitionFace[]): string {
@@ -558,9 +912,18 @@ window.addEventListener("resize", () => {
 function createChunkWorker(): Worker {
   const workerSource = `
     const BLOCK_WIDTH = ${TransvoxelExtractor.BlockWidth};
+    const PLATEAU_BASE_HEIGHT = ${PLATEAU_BASE_HEIGHT};
+    const PLATEAU_SIN_FREQ_X = ${PLATEAU_SIN_FREQ_X};
+    const PLATEAU_SIN_FREQ_Z = ${PLATEAU_SIN_FREQ_Z};
+    const PLATEAU_SIN_AMPLITUDE = ${PLATEAU_SIN_AMPLITUDE};
+    const FLOATING_SPHERE_SPACING = ${FLOATING_SPHERE_SPACING};
+    const FLOATING_SPHERE_RADIUS = ${FLOATING_SPHERE_RADIUS};
+    const FLOATING_SPHERE_BASE_HEIGHT = ${FLOATING_SPHERE_BASE_HEIGHT};
+    const FLOATING_SPHERE_SWAY_AMPLITUDE = ${FLOATING_SPHERE_SWAY_AMPLITUDE};
+    const FLOATING_SPHERE_SWAY_FREQUENCY = ${FLOATING_SPHERE_SWAY_FREQUENCY};
 
     self.onmessage = (event) => {
-      const { key, lodIndex, chunkX, chunkZ, originY, requestId } = event.data;
+      const { key, lodIndex, chunkX, chunkZ, originY, requestId, generatorId, generatorToken } = event.data;
       const range = BLOCK_WIDTH << lodIndex;
       const transitionReach = lodIndex === 0 ? 1 : ((1 << (lodIndex - 1)) * 2 + 1);
       const padding = Math.max(1, transitionReach);
@@ -571,6 +934,7 @@ function createChunkWorker(): Worker {
       const totalSamples = sampleSize * sampleSize * sampleSize;
       const data = new Int8Array(totalSamples);
       let index = 0;
+      const sampler = resolveSampler(generatorId);
 
       for (let z = 0; z < sampleSize; z++) {
         const worldZ = minZ + z;
@@ -578,19 +942,52 @@ function createChunkWorker(): Worker {
           const worldY = minY + y;
           for (let x = 0; x < sampleSize; x++) {
             const worldX = minX + x;
-            data[index++] = sampleTerrainDensity(worldX, worldY, worldZ);
+            data[index++] = sampler(worldX, worldY, worldZ);
           }
         }
       }
 
-      self.postMessage({ key, minX, minY, minZ, size: sampleSize, buffer: data.buffer, requestId }, [data.buffer]);
+      self.postMessage({ key, minX, minY, minZ, size: sampleSize, buffer: data.buffer, requestId, generatorId, generatorToken }, [data.buffer]);
     };
+
+    function resolveSampler(generatorId) {
+      switch (generatorId) {
+        case "plateaus":
+          return samplePlateauDensity;
+        case "spheres":
+          return sampleFloatingSpheresDensity;
+        default:
+          return sampleTerrainDensity;
+      }
+    }
 
     function sampleTerrainDensity(x, y, z) {
       const height = terrainHeight(x, z);
       const strata = Math.sin((x + z) * 0.05) * 2.5;
       const density = height + strata - y;
       return clampToByte(density * 6);
+    }
+
+    function samplePlateauDensity(x, y, z) {
+      const height = PLATEAU_BASE_HEIGHT + Math.sin(x * PLATEAU_SIN_FREQ_X) * PLATEAU_SIN_AMPLITUDE + Math.cos(z * PLATEAU_SIN_FREQ_Z) * PLATEAU_SIN_AMPLITUDE;
+      const density = height - y;
+      return clampToByte(density * 12);
+    }
+
+    function sphereCenterY(x, z) {
+      return FLOATING_SPHERE_BASE_HEIGHT + Math.sin((x + z) * FLOATING_SPHERE_SWAY_FREQUENCY) * FLOATING_SPHERE_SWAY_AMPLITUDE;
+    }
+
+    function sampleFloatingSpheresDensity(x, y, z) {
+      const centerX = Math.round(x / FLOATING_SPHERE_SPACING) * FLOATING_SPHERE_SPACING;
+      const centerZ = Math.round(z / FLOATING_SPHERE_SPACING) * FLOATING_SPHERE_SPACING;
+      const centerY = sphereCenterY(centerX, centerZ);
+      const dx = x - centerX;
+      const dy = y - centerY;
+      const dz = z - centerZ;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const density = FLOATING_SPHERE_RADIUS - dist;
+      return clampToByte(density * 12);
     }
 
     function terrainHeight(x, z) {

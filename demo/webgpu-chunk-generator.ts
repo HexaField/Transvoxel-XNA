@@ -1,6 +1,10 @@
 /// <reference types="@webgpu/types" />
 
-import type { ChunkFieldRequest, ChunkFieldResponse } from "./chunk-field-types";
+import type {
+  ChunkFieldRequest,
+  ChunkFieldResponse,
+  DensityGeneratorId,
+} from "./chunk-field-types";
 
 const WORKGROUP_SIZE = 4;
 const CHUNK_SAMPLER_SHADER = /* wgsl */ `
@@ -104,8 +108,16 @@ export class WebGPUChunkGenerator {
     return typeof navigator !== "undefined" && typeof navigator.gpu !== "undefined";
   }
 
+  supportsGenerator(generatorId: DensityGeneratorId): boolean {
+    return generatorId === "terrain";
+  }
+
   async generateChunkData(request: ChunkFieldRequest): Promise<ChunkFieldResponse> {
     await this.ensureReady();
+
+    if (!this.supportsGenerator(request.generatorId)) {
+      throw new Error(`Generator ${request.generatorId} is not supported by the WebGPU path.`);
+    }
 
     const device = this.device!;
     const pipeline = this.pipeline!;
@@ -167,6 +179,8 @@ export class WebGPUChunkGenerator {
       size: sampleSize,
       buffer: int8Result.buffer,
       requestId: request.requestId,
+      generatorId: request.generatorId,
+      generatorToken: request.generatorToken,
     };
   }
 
