@@ -72,6 +72,15 @@ interface PendingRequest {
   requestId: number;
 }
 
+interface ChunkBounds {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+  minZ: number;
+  maxZ: number;
+}
+
 export class OctreeChunkManager {
   private readonly maxLodIndex: number;
   private readonly lodLookup: Map<number, DerivedLodLevel>;
@@ -184,7 +193,18 @@ export class OctreeChunkManager {
     }
 
     for (const [key, record] of this.activeChunks.entries()) {
-      if (desired.has(key)) {
+      const desiredDescriptor = desired.get(key);
+      if (desiredDescriptor) {
+        if (
+          this.transitionFacesChanged(
+            record.transitionFaces,
+            desiredDescriptor.transitionFaces
+          )
+        ) {
+          this.disposeChunk(key, plan);
+          this.requestChunk(desiredDescriptor, plan);
+          continue;
+        }
         this.retainedParents.delete(key);
         continue;
       }
@@ -270,6 +290,7 @@ export class OctreeChunkManager {
       }
     }
 
+    this.assignTransitionFaces(desired);
     return desired;
   }
 
@@ -418,8 +439,7 @@ export class OctreeChunkManager {
 
   private buildInitialNodes(cameraPosition: Vector3Like): OctreeNode[] {
     const coarseSize = this.chunkWorldSize(this.maxLodIndex);
-    const farthest =
-      this.derivedLodLevels[this.derivedLodLevels.length - 1];
+    const farthest = this.derivedLodLevels[this.derivedLodLevels.length - 1];
     const radiusChunks = Math.ceil(farthest.maxDistance / coarseSize) + 2;
     const baseX = Math.floor(cameraPosition.x / coarseSize);
     const baseZ = Math.floor(cameraPosition.z / coarseSize);
@@ -585,7 +605,9 @@ export class OctreeChunkManager {
   }
 
   private finalizePlan(plan: ChunkPlan): ChunkPlan {
-    plan.requests.sort((a, b) => this.compareDescriptors(a.descriptor, b.descriptor));
+    plan.requests.sort((a, b) =>
+      this.compareDescriptors(a.descriptor, b.descriptor)
+    );
     plan.cancels.sort();
     plan.releases.sort();
     return plan;
@@ -667,14 +689,10 @@ export class OctreeChunkManager {
   ): void {
     this.ensureChunkRequested(parentDescriptor, plan);
     const parentKey = parentDescriptor.key;
-    const childKeys = this.computeChildKeys(parentDescriptor).filter((childKey) =>
-      this.activeChunks.has(childKey)
+    const childKeys = this.computeChildKeys(parentDescriptor).filter(
+      (childKey) => this.activeChunks.has(childKey)
     );
-    console.debug(
-      "[OctreeChunkManager] schedule merge",
-      parentKey,
-      childKeys
-    );
+    console.debug("[OctreeChunkManager] schedule merge", parentKey, childKeys);
 
     if (childKeys.length === 0) {
       this.pendingMergeParents.delete(parentKey);
@@ -815,7 +833,9 @@ export class OctreeChunkManager {
     for (let dz = 0; dz < 2; dz++) {
       for (let dy = 0; dy < 2; dy++) {
         for (let dx = 0; dx < 2; dx++) {
-          keys.push(this.chunkKey(childLod, baseX + dx, baseY + dy, baseZ + dz));
+          keys.push(
+            this.chunkKey(childLod, baseX + dx, baseY + dy, baseZ + dz)
+          );
         }
       }
     }
@@ -828,6 +848,182 @@ export class OctreeChunkManager {
 
   private chunkDiagonalRadius(lodIndex: number): number {
     return (this.chunkWorldSize(lodIndex) * Math.sqrt(3)) / 2;
+  }
+
+  private assignTransitionFaces(desired: Map<string, ChunkDescriptor>): void {
+    if (desired.size === 0) {
+      return;
+    }
+
+    const boundsByKey = new Map<string, ChunkBounds>();
+    const levelBuckets = new Map<number, ChunkBounds[]>();
+
+    desired.forEach((descriptor) => {
+      const bounds = this.computeDescriptorBounds(descriptor);
+      boundsByKey.set(descriptor.key, bounds);
+      const bucket = levelBuckets.get(descriptor.lodIndex);
+      if (bucket) {
+        bucket.push(bounds);
+      } else {
+        levelBuckets.set(descriptor.lodIndex, [bounds]);
+      }
+    });
+
+    desired.forEach((descriptor) => {
+      descriptor.transitionFaces = this.computeTransitionFaces(
+        descriptor,
+        boundsByKey,
+        levelBuckets
+      );
+    });
+  }
+
+  private computeTransitionFaces(
+    descriptor: ChunkDescriptor,
+    boundsByKey: Map<string, ChunkBounds>,
+    levelBuckets: Map<number, ChunkBounds[]>
+  ): TransitionFace[] {
+    if (descriptor.lodIndex === 0) {
+      return [];
+    }
+
+    const bounds = boundsByKey.get(descriptor.key);
+    if (!bounds) {
+      return [];
+    }
+
+    const faces = new Set<TransitionFace>();
+    for (let level = descriptor.lodIndex - 1; level >= 0; level--) {
+      const bucket = levelBuckets.get(level);
+      if (!bucket) {
+        continue;
+      }
+      for (const neighbor of bucket) {
+        this.evaluateTransitionAdjacency(bounds, neighbor, faces);
+        if (faces.size === 6) {
+          return Array.from(faces).sort();
+        }
+      }
+    }
+    return Array.from(faces).sort();
+  }
+
+  private evaluateTransitionAdjacency(
+    coarse: ChunkBounds,
+    neighbor: ChunkBounds,
+    faces: Set<TransitionFace>
+  ): void {
+    if (
+      neighbor.maxX === coarse.minX &&
+      this.rangesOverlap(
+        neighbor.minY,
+        neighbor.maxY,
+        coarse.minY,
+        coarse.maxY
+      ) &&
+      this.rangesOverlap(neighbor.minZ, neighbor.maxZ, coarse.minZ, coarse.maxZ)
+    ) {
+      faces.add("negativeX");
+    }
+    if (
+      neighbor.minX === coarse.maxX &&
+      this.rangesOverlap(
+        neighbor.minY,
+        neighbor.maxY,
+        coarse.minY,
+        coarse.maxY
+      ) &&
+      this.rangesOverlap(neighbor.minZ, neighbor.maxZ, coarse.minZ, coarse.maxZ)
+    ) {
+      faces.add("positiveX");
+    }
+    if (
+      neighbor.maxY === coarse.minY &&
+      this.rangesOverlap(
+        neighbor.minX,
+        neighbor.maxX,
+        coarse.minX,
+        coarse.maxX
+      ) &&
+      this.rangesOverlap(neighbor.minZ, neighbor.maxZ, coarse.minZ, coarse.maxZ)
+    ) {
+      faces.add("negativeY");
+    }
+    if (
+      neighbor.minY === coarse.maxY &&
+      this.rangesOverlap(
+        neighbor.minX,
+        neighbor.maxX,
+        coarse.minX,
+        coarse.maxX
+      ) &&
+      this.rangesOverlap(neighbor.minZ, neighbor.maxZ, coarse.minZ, coarse.maxZ)
+    ) {
+      faces.add("positiveY");
+    }
+    if (
+      neighbor.maxZ === coarse.minZ &&
+      this.rangesOverlap(
+        neighbor.minX,
+        neighbor.maxX,
+        coarse.minX,
+        coarse.maxX
+      ) &&
+      this.rangesOverlap(neighbor.minY, neighbor.maxY, coarse.minY, coarse.maxY)
+    ) {
+      faces.add("negativeZ");
+    }
+    if (
+      neighbor.minZ === coarse.maxZ &&
+      this.rangesOverlap(
+        neighbor.minX,
+        neighbor.maxX,
+        coarse.minX,
+        coarse.maxX
+      ) &&
+      this.rangesOverlap(neighbor.minY, neighbor.maxY, coarse.minY, coarse.maxY)
+    ) {
+      faces.add("positiveZ");
+    }
+  }
+
+  private rangesOverlap(
+    minA: number,
+    maxA: number,
+    minB: number,
+    maxB: number
+  ): boolean {
+    return Math.max(minA, minB) < Math.min(maxA, maxB);
+  }
+
+  private computeDescriptorBounds(descriptor: ChunkDescriptor): ChunkBounds {
+    const scale = this.config.blockWidth << descriptor.lodIndex;
+    const minX = descriptor.chunkX * scale;
+    const minZ = descriptor.chunkZ * scale;
+    const minY = descriptor.originY;
+    return {
+      minX,
+      maxX: minX + scale,
+      minY,
+      maxY: minY + scale,
+      minZ,
+      maxZ: minZ + scale,
+    };
+  }
+
+  private transitionFacesChanged(
+    current: TransitionFace[],
+    next: TransitionFace[]
+  ): boolean {
+    if (current.length !== next.length) {
+      return true;
+    }
+    for (let i = 0; i < current.length; i++) {
+      if (current[i] !== next[i]) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private chunkKey(
@@ -885,8 +1081,7 @@ export class OctreeChunkManager {
   }
 
   private teleportThreshold(): number {
-    const farthest =
-      this.derivedLodLevels[this.derivedLodLevels.length - 1];
+    const farthest = this.derivedLodLevels[this.derivedLodLevels.length - 1];
     const coarseSize = this.chunkWorldSize(this.maxLodIndex);
     const coarseSpan = coarseSize * 8;
     const lodSpan = farthest.maxDistance * 4;

@@ -25,6 +25,11 @@ const TELEPORT_LODS: LodLevel[] = [
   { lodIndex: 2, color: 0x0000ff, maxDistance: 160 },
 ];
 
+const TRANSITION_TEST_LODS: LodLevel[] = [
+  { lodIndex: 0, color: 0xff0000, maxDistance: 3.5 },
+  { lodIndex: 1, color: 0x00ff00, maxDistance: 128 },
+];
+
 const createManager = (
   overrides: Partial<OctreeChunkConfig> = {}
 ): OctreeChunkManager => {
@@ -67,6 +72,27 @@ const childKeysFor = (descriptor: ChunkDescriptor): string[] => {
     }
   }
   return keys;
+};
+
+const descriptorFor = (
+  blockWidth: number,
+  lodIndex: number,
+  chunkX: number,
+  chunkY: number,
+  chunkZ: number,
+  color = 0
+): ChunkDescriptor => {
+  const samplesPerAxis = blockWidth << lodIndex;
+  return {
+    lodIndex,
+    chunkX,
+    chunkY,
+    chunkZ,
+    key: `${lodIndex}:${chunkX}:${chunkY}:${chunkZ}`,
+    color,
+    transitionFaces: [],
+    originY: chunkY * samplesPerAxis,
+  };
 };
 
 describe("OctreeChunkManager", () => {
@@ -215,5 +241,85 @@ describe("OctreeChunkManager", () => {
     childKeys.forEach((key) => {
       expect(completionPlan.releases).toContain(key);
     });
+  });
+
+  it("assigns transition faces to coarse chunks bordering finer neighbors", () => {
+    const blockWidth = 2;
+    const manager = createManager({
+      blockWidth,
+      lodLevels: TRANSITION_TEST_LODS,
+      worldMinY: 0,
+      worldMaxY: blockWidth << 1,
+    });
+    const desired = new Map<string, ChunkDescriptor>();
+    const coarse = descriptorFor(blockWidth, 1, 0, 0, 0, 0x00ff00);
+    const finePositiveX = descriptorFor(blockWidth, 0, 2, 0, 0, 0xff0000);
+    const finePositiveZ = descriptorFor(blockWidth, 0, 0, 0, 2, 0xff0000);
+    desired.set(coarse.key, coarse);
+    desired.set(finePositiveX.key, finePositiveX);
+    desired.set(finePositiveZ.key, finePositiveZ);
+
+    (manager as any).assignTransitionFaces(desired);
+
+    expect(coarse.transitionFaces).toEqual(["positiveX", "positiveZ"]);
+    expect(finePositiveX.transitionFaces).toHaveLength(0);
+    expect(finePositiveZ.transitionFaces).toHaveLength(0);
+  });
+
+  it("leaves transition faces empty when no finer neighbors touch the chunk", () => {
+    const blockWidth = 2;
+    const manager = createManager({
+      blockWidth,
+      lodLevels: TRANSITION_TEST_LODS,
+      worldMinY: 0,
+      worldMaxY: blockWidth << 1,
+    });
+    const desired = new Map<string, ChunkDescriptor>();
+    const coarse = descriptorFor(blockWidth, 1, 0, 0, 0, 0x00ff00);
+    const neighborSameLod = descriptorFor(blockWidth, 1, 1, 0, 0, 0x00ff00);
+    desired.set(coarse.key, coarse);
+    desired.set(neighborSameLod.key, neighborSameLod);
+
+    (manager as any).assignTransitionFaces(desired);
+
+    expect(coarse.transitionFaces).toHaveLength(0);
+    expect(neighborSameLod.transitionFaces).toHaveLength(0);
+  });
+
+  it("re-requests an active chunk when its transition faces change", () => {
+    const blockWidth = 2;
+    const manager = createManager({
+      blockWidth,
+      lodLevels: TRANSITION_TEST_LODS,
+      worldMinY: 0,
+      worldMaxY: blockWidth << 1,
+    });
+
+    const desired = new Map<string, ChunkDescriptor>();
+    const coarse = descriptorFor(blockWidth, 1, 0, 0, 0, 0x00ff00);
+    const finePositiveX = descriptorFor(blockWidth, 0, 2, 0, 0, 0xff0000);
+    desired.set(coarse.key, { ...coarse });
+    desired.set(finePositiveX.key, finePositiveX);
+
+    (manager as any).assignTransitionFaces(desired);
+
+    const desiredCoarse = desired.get(coarse.key)!;
+    const managerInternal = manager as any;
+    managerInternal.activeChunks.set(coarse.key, {
+      ...coarse,
+      transitionFaces: [],
+    });
+
+    const plan = managerInternal.reconcile(desired, false) as ChunkPlan;
+    expect(plan.releases).toContain(coarse.key);
+
+    const refreshed = plan.requests.find(
+      (request: ChunkRequest) => request.descriptor.key === coarse.key
+    );
+
+    expect(refreshed).toBeDefined();
+    expect(refreshed!.descriptor.transitionFaces).toEqual(
+      desiredCoarse.transitionFaces
+    );
   });
 });

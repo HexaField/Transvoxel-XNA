@@ -114,6 +114,9 @@ const densityColorNegative = new Color("#ff8c8c");
 const densityColorNeutral = new Color("#7b7b7b");
 const densityColorScratch = new Color();
 const densityTransformScratch = new Object3D();
+const transitionBlendScratch = new Color();
+const transitionTempScratch = new Color();
+const transitionBaseColorScratch = new Color();
 
 const chunkWorldSize = (lodIndex: number): number =>
   CELL_SIZE * (BLOCK_WIDTH << lodIndex);
@@ -141,6 +144,15 @@ const chunkKey = (
   chunkY: number,
   chunkZ: number
 ): string => `${lodIndex}:${chunkX}:${chunkY}:${chunkZ}`;
+
+const TRANSITION_FACE_COLORS: Record<TransitionFace, number> = {
+  negativeX: 0xff6b6b,
+  positiveX: 0xffb347,
+  negativeY: 0x3dd598,
+  positiveY: 0x1f9dff,
+  negativeZ: 0xd96bff,
+  positiveZ: 0xffd700,
+};
 
 interface DensityGenerator {
   id: DensityGeneratorId;
@@ -572,8 +584,9 @@ function buildChunkRecord(
   }
 
   const built = meshDataToGeometry(meshData);
+  const resolvedColor = materialColorForDescriptor(descriptor);
   const material = new MeshStandardMaterial({
-    color: descriptor.color,
+    color: resolvedColor,
     roughness: 0.9,
     metalness: 0.05,
     flatShading: true,
@@ -591,7 +604,7 @@ function buildChunkRecord(
     chunkX: descriptor.chunkX,
     chunkY: descriptor.chunkY,
     chunkZ: descriptor.chunkZ,
-    color: descriptor.color,
+    color: resolvedColor,
     originY: descriptor.originY,
     generatorId,
     descriptor,
@@ -890,6 +903,22 @@ function transitionSignature(faces: TransitionFace[]): string {
     return "none";
   }
   return faces.slice().sort().join(",");
+}
+
+function materialColorForDescriptor(descriptor: ChunkDescriptor): number {
+  if (descriptor.transitionFaces.length === 0) {
+    return descriptor.color;
+  }
+  transitionBlendScratch.setRGB(0, 0, 0);
+  descriptor.transitionFaces.forEach((face) => {
+    const tint = TRANSITION_FACE_COLORS[face] ?? descriptor.color;
+    transitionTempScratch.set(tint);
+    transitionBlendScratch.add(transitionTempScratch);
+  });
+  transitionBlendScratch.multiplyScalar(1 / descriptor.transitionFaces.length);
+  transitionBaseColorScratch.set(descriptor.color);
+  transitionBaseColorScratch.lerp(transitionBlendScratch, 0.75);
+  return transitionBaseColorScratch.getHex();
 }
 const animate = () => {
   controls.update();
