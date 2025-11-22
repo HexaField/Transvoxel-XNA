@@ -19,11 +19,7 @@ export interface QuadChunkConfig {
   blockWidth: number;
   cellSize: number;
   lodLevels: LodLevel[];
-  estimateOriginY: (
-    lodIndex: number,
-    chunkX: number,
-    chunkZ: number
-  ) => number;
+  estimateOriginY: (lodIndex: number, chunkX: number, chunkZ: number) => number;
 }
 
 export interface ChunkDescriptor {
@@ -97,6 +93,7 @@ export class QuadChunkManager {
       : false;
     this.lastCameraPosition = { x: cameraPosition.x, z: cameraPosition.z };
     const desired = this.collectDesiredChunks(cameraPosition);
+    this.pruneDistantChunks(desired, cameraPosition, previousPosition);
     const plan = this.reconcile(desired, teleported);
     this.desiredChunkKeys = new Set(desired.keys());
     return plan;
@@ -169,9 +166,7 @@ export class QuadChunkManager {
         continue;
       }
 
-      if (this.shouldCullChunk(record)) {
-        this.disposeChunk(key, plan);
-      }
+      this.disposeChunk(key, plan);
     }
 
     for (const pendingKey of Array.from(this.pendingRequests.keys())) {
@@ -209,7 +204,6 @@ export class QuadChunkManager {
 
       const distance = this.chunkDistance(node, cameraPosition);
       const radius = this.chunkDiagonalRadius(node.lodIndex);
-
       const culled =
         !node.forceInclude && distance > level.maxDistance + radius;
       if (culled) {
@@ -233,6 +227,112 @@ export class QuadChunkManager {
     }
 
     return desired;
+  }
+
+  private pruneDistantChunks(
+    desired: Map<string, ChunkDescriptor>,
+    cameraPosition: Vector2Like,
+    previousPosition: Vector2Like | null
+  ): void {
+    if (!previousPosition || desired.size === 0) {
+      return;
+    }
+
+    const travelVector = {
+      x: cameraPosition.x - previousPosition.x,
+      z: cameraPosition.z - previousPosition.z,
+    };
+    const travelDistance = Math.hypot(travelVector.x, travelVector.z);
+    if (travelDistance === 0) {
+      return;
+    }
+
+    const coarseSize = this.chunkWorldSize(this.maxLodIndex);
+    const farthestLevel =
+      this.config.lodLevels[this.config.lodLevels.length - 1];
+    const movementThreshold = Math.max(
+      coarseSize * 2,
+      farthestLevel.maxDistance * 0.5
+    );
+    if (travelDistance < movementThreshold) {
+      return;
+    }
+
+    const level = this.lodLookup.get(this.maxLodIndex);
+    if (!level || level.maxDistance < coarseSize) {
+      return;
+    }
+
+    const dirX = travelVector.x / travelDistance;
+    const dirZ = travelVector.z / travelDistance;
+    // Drop coarse chunks that now sit well behind the camera after a large move.
+    const coarseDescriptors: ChunkDescriptor[] = [];
+    for (const descriptor of desired.values()) {
+      if (descriptor.lodIndex === this.maxLodIndex) {
+        coarseDescriptors.push(descriptor);
+      }
+    }
+    for (const descriptor of this.activeChunks.values()) {
+      if (
+        descriptor.lodIndex === this.maxLodIndex &&
+        !desired.has(descriptor.key)
+      ) {
+        coarseDescriptors.push(descriptor);
+      }
+    }
+
+    for (const descriptor of coarseDescriptors) {
+      const chunkSize = this.chunkWorldSize(descriptor.lodIndex);
+      const centerX = (descriptor.chunkX + 0.5) * chunkSize;
+      const centerZ = (descriptor.chunkZ + 0.5) * chunkSize;
+      const offsetX = centerX - cameraPosition.x;
+      const offsetZ = centerZ - cameraPosition.z;
+      const projection = offsetX * dirX + offsetZ * dirZ;
+      if (projection >= -chunkSize) {
+        continue;
+      }
+      desired.delete(descriptor.key);
+      this.removeDescendantDesiredChunks(desired, descriptor);
+    }
+  }
+
+  private removeDescendantDesiredChunks(
+    desired: Map<string, ChunkDescriptor>,
+    parent: ChunkDescriptor
+  ): void {
+    for (const [childKey, childDescriptor] of Array.from(desired.entries())) {
+      if (!childDescriptor || childDescriptor.lodIndex >= parent.lodIndex) {
+        continue;
+      }
+      if (this.isDescendantChunk(parent, childDescriptor)) {
+        desired.delete(childKey);
+      }
+    }
+  }
+
+  private isDescendantChunk(
+    parent: ChunkDescriptor,
+    child: ChunkDescriptor
+  ): boolean {
+    if (child.lodIndex >= parent.lodIndex) {
+      return false;
+    }
+    const parentSize = this.chunkWorldSize(parent.lodIndex);
+    const childSize = this.chunkWorldSize(child.lodIndex);
+    const parentMinX = parent.chunkX * parentSize;
+    const parentMaxX = parentMinX + parentSize;
+    const parentMinZ = parent.chunkZ * parentSize;
+    const parentMaxZ = parentMinZ + parentSize;
+    const childMinX = child.chunkX * childSize;
+    const childMaxX = childMinX + childSize;
+    const childMinZ = child.chunkZ * childSize;
+    const childMaxZ = childMinZ + childSize;
+    return (
+      childMinX >= parentMinX &&
+      childMaxX <= parentMaxX &&
+      childMinZ >= parentMinZ &&
+      childMaxZ <= parentMaxZ
+    );
   }
 
   private buildInitialNodes(cameraPosition: Vector2Like): QuadNode[] {
@@ -529,21 +629,6 @@ export class QuadChunkManager {
     return null;
   }
 
-  private shouldCullChunk(record: ChunkDescriptor): boolean {
-    if (!this.lastCameraPosition) {
-      return false;
-    }
-    const distance = this.chunkDistanceFromDescriptor(
-      record,
-      this.lastCameraPosition
-    );
-    const level = this.lodLookup.get(record.lodIndex);
-    const maxDistance = level
-      ? level.maxDistance
-      : this.chunkWorldSize(record.lodIndex) * 4;
-    return distance > maxDistance * 1.5;
-  }
-
   private getParentKey(
     lodIndex: number,
     chunkX: number,
@@ -609,18 +694,6 @@ export class QuadChunkManager {
     };
   }
 
-  private chunkDistanceFromDescriptor(
-    descriptor: ChunkDescriptor,
-    point: Vector2Like
-  ): number {
-    return this.chunkDistanceToPoint(
-      descriptor.lodIndex,
-      descriptor.chunkX,
-      descriptor.chunkZ,
-      point
-    );
-  }
-
   private chunkDistanceToPoint(
     lodIndex: number,
     chunkX: number,
@@ -632,8 +705,10 @@ export class QuadChunkManager {
     const maxX = minX + size;
     const minZ = chunkZ * size;
     const maxZ = minZ + size;
-    const dx = point.x < minX ? minX - point.x : point.x > maxX ? point.x - maxX : 0;
-    const dz = point.z < minZ ? minZ - point.z : point.z > maxZ ? point.z - maxZ : 0;
+    const dx =
+      point.x < minX ? minX - point.x : point.x > maxX ? point.x - maxX : 0;
+    const dz =
+      point.z < minZ ? minZ - point.z : point.z > maxZ ? point.z - maxZ : 0;
     return Math.hypot(dx, dz);
   }
 

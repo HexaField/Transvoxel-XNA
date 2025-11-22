@@ -72,7 +72,7 @@ const CELL_SIZE = 1;
 const LOD_LEVELS: LodLevel[] = [
   { lodIndex: 0, color: 0xff0000, maxDistance: 48 }, // red - fine detail
   { lodIndex: 1, color: 0x00ff00, maxDistance: 120 }, // green - medium detail
-  { lodIndex: 2, color: 0x6666ff, maxDistance: 260 }, // blue - coarse detail
+  { lodIndex: 2, color: 0x6666ff, maxDistance: 360 }, // blue - coarse detail
 ];
 
 const MAX_LOD_INDEX = LOD_LEVELS[LOD_LEVELS.length - 1].lodIndex;
@@ -189,6 +189,7 @@ interface PendingChunkRequest {
 const mesher = new TransvoxelMesher();
 const chunkWorker: Worker = createChunkWorker();
 const activeChunks = new Map<string, ChunkRecord>();
+const stagedChunks = new Map<string, ChunkRecord>();
 const pendingBuilds = new Map<string, PendingChunkRequest>();
 const buildQueue: ChunkRequest[] = [];
 let inflightBuilds = 0;
@@ -219,9 +220,12 @@ function applyChunkPlan(plan: ChunkPlan): void {
   for (const key of plan.cancels) {
     removeFromBuildQueue(key);
     pendingBuilds.delete(key);
+    discardStagedChunk(key);
   }
 
   for (const key of plan.releases) {
+    promoteChildrenForParent(key);
+    discardStagedChunk(key);
     disposeChunk(key);
   }
 
@@ -318,7 +322,7 @@ function handleWorkerMessage(message: ChunkWorkerResponse): void {
   const outcome = record ? "mesh" : "empty";
 
   if (record) {
-    addChunkToScene(record);
+    stageChunkRecord(record);
   }
 
   const finalizePlan = chunkScheduler.finalizeRequest({
@@ -395,6 +399,95 @@ function releaseChunkResources(record: ChunkRecord): void {
   scene.remove(record.mesh);
   record.mesh.geometry.dispose();
   record.material.dispose();
+}
+
+function stageChunkRecord(record: ChunkRecord): void {
+  stagedChunks.set(record.key, record);
+  if (!shouldHoldForParent(record)) {
+    showStagedChunk(record.key);
+  }
+}
+
+function promoteChildrenForParent(parentKey: string): void {
+  const parentInfo = parseChunkKey(parentKey);
+  if (!parentInfo || parentInfo.lodIndex === 0) {
+    return;
+  }
+  const childKeys = childKeysForParent(parentInfo);
+  if (childKeys.every((key) => stagedChunks.has(key))) {
+    childKeys.forEach((key) => showStagedChunk(key));
+  }
+}
+
+function showStagedChunk(key: string): void {
+  const record = stagedChunks.get(key);
+  if (!record) {
+    return;
+  }
+  stagedChunks.delete(key);
+  addChunkToScene(record);
+}
+
+function discardStagedChunk(key: string): void {
+  const record = stagedChunks.get(key);
+  if (!record) {
+    return;
+  }
+  stagedChunks.delete(key);
+  releaseChunkResources(record);
+}
+
+function shouldHoldForParent(record: ChunkRecord): boolean {
+  const parentKey = parentKeyFor(record);
+  if (!parentKey) {
+    return false;
+  }
+  return activeChunks.has(parentKey);
+}
+
+function parentKeyFor(record: ChunkRecord): string | null {
+  if (record.lodIndex >= MAX_LOD_INDEX) {
+    return null;
+  }
+  const parentLod = record.lodIndex + 1;
+  const parentX = Math.floor(record.chunkX / 2);
+  const parentZ = Math.floor(record.chunkZ / 2);
+  return chunkKey(parentLod, parentX, parentZ);
+}
+
+function parseChunkKey(
+  key: string
+): { lodIndex: number; chunkX: number; chunkZ: number } | null {
+  const parts = key.split(":");
+  if (parts.length !== 3) {
+    return null;
+  }
+  const lodIndex = Number(parts[0]);
+  const chunkX = Number(parts[1]);
+  const chunkZ = Number(parts[2]);
+  if (Number.isNaN(lodIndex) || Number.isNaN(chunkX) || Number.isNaN(chunkZ)) {
+    return null;
+  }
+  return { lodIndex, chunkX, chunkZ };
+}
+
+function childKeysForParent(parent: {
+  lodIndex: number;
+  chunkX: number;
+  chunkZ: number;
+}): string[] {
+  if (parent.lodIndex === 0) {
+    return [];
+  }
+  const childLod = parent.lodIndex - 1;
+  const baseX = parent.chunkX * 2;
+  const baseZ = parent.chunkZ * 2;
+  return [
+    chunkKey(childLod, baseX, baseZ),
+    chunkKey(childLod, baseX + 1, baseZ),
+    chunkKey(childLod, baseX, baseZ + 1),
+    chunkKey(childLod, baseX + 1, baseZ + 1),
+  ];
 }
 
 function updateTerrainStats(): void {

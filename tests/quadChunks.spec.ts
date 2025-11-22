@@ -19,7 +19,15 @@ const SPLIT_LODS: LodLevel[] = [
   { lodIndex: 1, color: 0x00ff00, maxDistance: 0.5 },
 ];
 
-const createManager = (overrides: Partial<QuadChunkConfig> = {}): QuadChunkManager => {
+const TELEPORT_LODS: LodLevel[] = [
+  { lodIndex: 0, color: 0xff0000, maxDistance: 16 },
+  { lodIndex: 1, color: 0x00ff00, maxDistance: 64 },
+  { lodIndex: 2, color: 0x0000ff, maxDistance: 128 },
+];
+
+const createManager = (
+  overrides: Partial<QuadChunkConfig> = {}
+): QuadChunkManager => {
   const config: QuadChunkConfig = {
     blockWidth: overrides.blockWidth ?? 4,
     cellSize: overrides.cellSize ?? 1,
@@ -29,7 +37,8 @@ const createManager = (overrides: Partial<QuadChunkConfig> = {}): QuadChunkManag
   return new QuadChunkManager(config);
 };
 
-const chunkKeys = (plan: ChunkPlan): string[] => plan.requests.map((request) => request.descriptor.key);
+const chunkKeys = (plan: ChunkPlan): string[] =>
+  plan.requests.map((request) => request.descriptor.key);
 
 const completeRequest = (
   manager: QuadChunkManager,
@@ -99,8 +108,57 @@ describe("QuadChunkManager", () => {
     const chunkSize = blockWidth << 1;
 
     const plan = manager.update({ x: 0.1, z: chunkSize * 0.5 });
-    const hasFinest = plan.requests.some((request) => request.descriptor.lodIndex === 0);
+    const hasFinest = plan.requests.some(
+      (request) => request.descriptor.lodIndex === 0
+    );
     expect(hasFinest).toBe(true);
+  });
+
+  it("flushes far coarse chunks when teleporting to a new origin", () => {
+    const manager = createManager({ blockWidth: 4, lodLevels: TELEPORT_LODS });
+    const startPlan = manager.update({ x: 0, z: 0 });
+    const coarseRequests = startPlan.requests.filter(
+      (r) => r.descriptor.lodIndex === 2
+    );
+    expect(coarseRequests.length).toBeGreaterThan(0);
+    coarseRequests.forEach((request) => completeRequest(manager, request));
+
+    const teleportPlan = manager.update({ x: 300, z: 0 });
+    coarseRequests.forEach((request) => {
+      expect(teleportPlan.releases).toContain(request.descriptor.key);
+      expect(chunkKeys(teleportPlan)).not.toContain(request.descriptor.key);
+    });
+  });
+
+  it("cancels pending work from the previous origin after a teleport", () => {
+    const manager = createManager({ blockWidth: 4, lodLevels: TELEPORT_LODS });
+    const pendingPlan = manager.update({ x: 0, z: 0 });
+    const pendingKeys = pendingPlan.requests.map(
+      (request) => request.descriptor.key
+    );
+    expect(pendingKeys.length).toBeGreaterThan(0);
+
+    const teleportPlan = manager.update({ x: 300, z: 150 });
+    pendingKeys.forEach((key) => {
+      expect(teleportPlan.cancels).toContain(key);
+    });
+  });
+
+  it("disposes old LOD 2 chunks after a moderate jump", () => {
+    const manager = createManager({ blockWidth: 4, lodLevels: TELEPORT_LODS });
+    const startPlan = manager.update({ x: 0, z: 0 });
+    const coarseRequest = startPlan.requests
+      .filter((r) => r.descriptor.lodIndex === 2)
+      .sort((a, b) => {
+        const aDist = Math.hypot(a.descriptor.chunkX, a.descriptor.chunkZ);
+        const bDist = Math.hypot(b.descriptor.chunkX, b.descriptor.chunkZ);
+        return aDist - bDist;
+      })[0];
+    expect(coarseRequest).toBeDefined();
+    completeRequest(manager, coarseRequest!);
+
+    const jumpPlan = manager.update({ x: 140, z: 0 });
+    expect(jumpPlan.releases).toContain(coarseRequest!.descriptor.key);
   });
 
   it("splits an active parent chunk and releases it after children finish", () => {
@@ -112,7 +170,9 @@ describe("QuadChunkManager", () => {
     const targetParentKey = `1:0:0`;
 
     const coarsePlan = manager.update(farCamera);
-    const parentRequest = coarsePlan.requests.find((r) => r.descriptor.key === targetParentKey);
+    const parentRequest = coarsePlan.requests.find(
+      (r) => r.descriptor.key === targetParentKey
+    );
     expect(parentRequest).toBeDefined();
 
     const parentKey = parentRequest!.descriptor.key;
@@ -128,7 +188,9 @@ describe("QuadChunkManager", () => {
 
     const releases = new Set<string>();
     for (const key of expectedChildKeys) {
-      const childRequest = splitPlan.requests.find((request) => request.descriptor.key === key);
+      const childRequest = splitPlan.requests.find(
+        (request) => request.descriptor.key === key
+      );
       expect(childRequest).toBeDefined();
       const finalizePlan = completeRequest(manager, childRequest!);
       finalizePlan.releases.forEach((releaseKey) => releases.add(releaseKey));
@@ -146,19 +208,25 @@ describe("QuadChunkManager", () => {
     const targetParentKey = `1:0:0`;
 
     const coarsePlan = manager.update(farCamera);
-    const parentRequest = coarsePlan.requests.find((r) => r.descriptor.key === targetParentKey);
+    const parentRequest = coarsePlan.requests.find(
+      (r) => r.descriptor.key === targetParentKey
+    );
     expect(parentRequest).toBeDefined();
     completeRequest(manager, parentRequest!);
 
     const splitPlan = manager.update(nearCamera);
     const childKeys = childKeysFor(parentRequest!.descriptor);
-    const childRequests = splitPlan.requests.filter((request) => childKeys.includes(request.descriptor.key));
+    const childRequests = splitPlan.requests.filter((request) =>
+      childKeys.includes(request.descriptor.key)
+    );
     expect(childRequests).toHaveLength(childKeys.length);
     childRequests.forEach((request) => completeRequest(manager, request));
 
     const mergePlan = manager.update(farCamera);
     expect(chunkKeys(mergePlan)).toContain(parentRequest!.descriptor.key);
-    expect(mergePlan.releases.some((key) => childKeys.includes(key))).toBe(false);
+    expect(mergePlan.releases.some((key) => childKeys.includes(key))).toBe(
+      false
+    );
 
     const parentMergeRequest = mergePlan.requests.find(
       (request) => request.descriptor.key === parentRequest!.descriptor.key
