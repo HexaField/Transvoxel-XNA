@@ -1,6 +1,8 @@
 export type TransitionFace =
   | "negativeX"
   | "positiveX"
+  | "negativeY"
+  | "positiveY"
   | "negativeZ"
   | "positiveZ";
 
@@ -12,22 +14,25 @@ export interface LodLevel {
 
 type DerivedLodLevel = LodLevel & { maxDistance: number };
 
-export interface Vector2Like {
+export interface Vector3Like {
   x: number;
+  y: number;
   z: number;
 }
 
-export interface QuadChunkConfig {
+export interface OctreeChunkConfig {
   blockWidth: number;
   cellSize: number;
   lodLevels: LodLevel[];
+  worldMinY: number;
+  worldMaxY: number;
   lodDistanceMultiplier?: number;
-  estimateOriginY: (lodIndex: number, chunkX: number, chunkZ: number) => number;
 }
 
 export interface ChunkDescriptor {
   lodIndex: number;
   chunkX: number;
+  chunkY: number;
   chunkZ: number;
   key: string;
   color: number;
@@ -54,9 +59,10 @@ export interface ChunkBuildCompletion {
   outcome: ChunkBuildOutcome;
 }
 
-interface QuadNode {
+interface OctreeNode {
   lodIndex: number;
   chunkX: number;
+  chunkY: number;
   chunkZ: number;
   forceInclude?: boolean;
 }
@@ -66,12 +72,16 @@ interface PendingRequest {
   requestId: number;
 }
 
-export class QuadChunkManager {
+export class OctreeChunkManager {
   private readonly maxLodIndex: number;
   private readonly lodLookup: Map<number, DerivedLodLevel>;
   private readonly derivedLodLevels: DerivedLodLevel[];
   private readonly lodDistanceMultiplier: number;
-  private lastCameraPosition: Vector2Like | null = null;
+  private readonly worldMinY: number;
+  private readonly worldMaxY: number;
+  private readonly coarseMinChunkY: number;
+  private readonly coarseMaxChunkY: number;
+  private lastCameraPosition: Vector3Like | null = null;
   private desiredChunkKeys = new Set<string>();
   private nextRequestId = 1;
   private readonly activeChunks = new Map<string, ChunkDescriptor>();
@@ -80,10 +90,15 @@ export class QuadChunkManager {
   private readonly pendingMergeParents = new Map<string, Set<string>>();
   private readonly emptyChunks = new Set<string>();
 
-  constructor(private readonly config: QuadChunkConfig) {
+  constructor(private readonly config: OctreeChunkConfig) {
     if (config.lodLevels.length === 0) {
       throw new Error("At least one LOD level is required");
     }
+    if (config.worldMaxY <= config.worldMinY) {
+      throw new RangeError("worldMaxY must be greater than worldMinY");
+    }
+    this.worldMinY = config.worldMinY;
+    this.worldMaxY = config.worldMaxY;
     this.lodDistanceMultiplier = config.lodDistanceMultiplier ?? 1.5;
     this.derivedLodLevels = config.lodLevels
       .map((level) => ({
@@ -98,20 +113,27 @@ export class QuadChunkManager {
     this.lodLookup = new Map(
       this.derivedLodLevels.map((level) => [level.lodIndex, level])
     );
+    const coarseSize = this.chunkWorldSize(this.maxLodIndex);
+    this.coarseMinChunkY = Math.floor(this.worldMinY / coarseSize);
+    this.coarseMaxChunkY = Math.floor((this.worldMaxY - 1) / coarseSize);
   }
 
-  update(cameraPosition: Vector2Like): ChunkPlan {
+  update(cameraPosition: Vector3Like): ChunkPlan {
     const previousPosition = this.lastCameraPosition;
     const teleported = previousPosition
       ? this.distanceBetween(previousPosition, cameraPosition) >
         this.teleportThreshold()
       : false;
-    this.lastCameraPosition = { x: cameraPosition.x, z: cameraPosition.z };
+    this.lastCameraPosition = {
+      x: cameraPosition.x,
+      y: cameraPosition.y,
+      z: cameraPosition.z,
+    };
     const desired = this.collectDesiredChunks(cameraPosition);
     this.pruneDistantChunks(desired, cameraPosition, previousPosition);
     const plan = this.reconcile(desired, teleported);
     this.desiredChunkKeys = new Set(desired.keys());
-    return plan;
+    return this.finalizePlan(plan);
   }
 
   isRequestPending(key: string, requestId: number): boolean {
@@ -124,7 +146,7 @@ export class QuadChunkManager {
     const { descriptor, requestId, outcome } = completion;
     const pending = this.pendingRequests.get(descriptor.key);
     if (!pending || pending.requestId !== requestId) {
-      return plan;
+      return this.finalizePlan(plan);
     }
 
     this.pendingRequests.delete(descriptor.key);
@@ -133,7 +155,7 @@ export class QuadChunkManager {
       if (outcome === "mesh") {
         plan.releases.push(descriptor.key);
       }
-      return plan;
+      return this.finalizePlan(plan);
     }
 
     if (outcome === "empty") {
@@ -144,7 +166,7 @@ export class QuadChunkManager {
 
     this.resolveParentRetention(descriptor, plan);
     this.completePendingMerge(descriptor.key, plan);
-    return plan;
+    return this.finalizePlan(plan);
   }
 
   getPendingDescriptor(key: string): ChunkDescriptor | undefined {
@@ -168,7 +190,7 @@ export class QuadChunkManager {
       }
 
       const childDescriptors = this.collectChildDescriptors(record, desired);
-      if (childDescriptors.length === 4) {
+      if (childDescriptors.length === 8) {
         this.scheduleSplit(record, childDescriptors, plan);
         continue;
       } else {
@@ -205,13 +227,16 @@ export class QuadChunkManager {
   }
 
   private collectDesiredChunks(
-    cameraPosition: Vector2Like
+    cameraPosition: Vector3Like
   ): Map<string, ChunkDescriptor> {
     const desired = new Map<string, ChunkDescriptor>();
     const queue = this.buildInitialNodes(cameraPosition);
 
     while (queue.length) {
       const node = queue.pop()!;
+      if (!this.isNodeWithinWorld(node)) {
+        continue;
+      }
       const level = this.lodLookup.get(node.lodIndex);
       if (!level) {
         continue;
@@ -220,7 +245,9 @@ export class QuadChunkManager {
       const distance = this.chunkDistance(node, cameraPosition);
       const radius = this.chunkDiagonalRadius(node.lodIndex);
       const culled =
-        !node.forceInclude && distance > level.maxDistance + radius;
+        !node.forceInclude &&
+        node.lodIndex !== this.maxLodIndex &&
+        distance > level.maxDistance + radius;
       if (culled) {
         continue;
       }
@@ -232,12 +259,14 @@ export class QuadChunkManager {
         continue;
       }
 
-      const key = this.chunkKey(node.lodIndex, node.chunkX, node.chunkZ);
+      const key = this.chunkKey(
+        node.lodIndex,
+        node.chunkX,
+        node.chunkY,
+        node.chunkZ
+      );
       if (!desired.has(key)) {
-        desired.set(
-          key,
-          this.createDescriptor(node.lodIndex, node.chunkX, node.chunkZ)
-        );
+        desired.set(key, this.createDescriptor(node));
       }
     }
 
@@ -246,8 +275,8 @@ export class QuadChunkManager {
 
   private pruneDistantChunks(
     desired: Map<string, ChunkDescriptor>,
-    cameraPosition: Vector2Like,
-    previousPosition: Vector2Like | null
+    cameraPosition: Vector3Like,
+    previousPosition: Vector3Like | null
   ): void {
     if (!previousPosition || desired.size === 0) {
       return;
@@ -255,9 +284,14 @@ export class QuadChunkManager {
 
     const travelVector = {
       x: cameraPosition.x - previousPosition.x,
+      y: cameraPosition.y - previousPosition.y,
       z: cameraPosition.z - previousPosition.z,
     };
-    const travelDistance = Math.hypot(travelVector.x, travelVector.z);
+    const travelDistance = Math.hypot(
+      travelVector.x,
+      travelVector.y,
+      travelVector.z
+    );
     if (travelDistance === 0) {
       return;
     }
@@ -279,8 +313,8 @@ export class QuadChunkManager {
     }
 
     const dirX = travelVector.x / travelDistance;
+    const dirY = travelVector.y / travelDistance;
     const dirZ = travelVector.z / travelDistance;
-    // Drop coarse chunks that now sit well behind the camera after a large move.
     const coarseDescriptors: ChunkDescriptor[] = [];
     for (const descriptor of desired.values()) {
       if (descriptor.lodIndex === this.maxLodIndex) {
@@ -299,16 +333,42 @@ export class QuadChunkManager {
     for (const descriptor of coarseDescriptors) {
       const chunkSize = this.chunkWorldSize(descriptor.lodIndex);
       const centerX = (descriptor.chunkX + 0.5) * chunkSize;
+      const centerY = (descriptor.chunkY + 0.5) * chunkSize;
       const centerZ = (descriptor.chunkZ + 0.5) * chunkSize;
       const offsetX = centerX - cameraPosition.x;
+      const offsetY = centerY - cameraPosition.y;
       const offsetZ = centerZ - cameraPosition.z;
-      const projection = offsetX * dirX + offsetZ * dirZ;
+      const projection = offsetX * dirX + offsetY * dirY + offsetZ * dirZ;
       if (projection >= -chunkSize) {
+        continue;
+      }
+      if (this.hasActiveDescendants(descriptor)) {
         continue;
       }
       desired.delete(descriptor.key);
       this.removeDescendantDesiredChunks(desired, descriptor);
     }
+  }
+
+  private hasActiveDescendants(descriptor: ChunkDescriptor): boolean {
+    for (const record of this.activeChunks.values()) {
+      if (
+        record.lodIndex < descriptor.lodIndex &&
+        this.isDescendantChunk(descriptor, record)
+      ) {
+        return true;
+      }
+    }
+    for (const pending of this.pendingRequests.values()) {
+      const child = pending.descriptor;
+      if (
+        child.lodIndex < descriptor.lodIndex &&
+        this.isDescendantChunk(descriptor, child)
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private removeDescendantDesiredChunks(
@@ -336,35 +396,62 @@ export class QuadChunkManager {
     const childSize = this.chunkWorldSize(child.lodIndex);
     const parentMinX = parent.chunkX * parentSize;
     const parentMaxX = parentMinX + parentSize;
+    const parentMinY = parent.chunkY * parentSize;
+    const parentMaxY = parentMinY + parentSize;
     const parentMinZ = parent.chunkZ * parentSize;
     const parentMaxZ = parentMinZ + parentSize;
     const childMinX = child.chunkX * childSize;
     const childMaxX = childMinX + childSize;
+    const childMinY = child.chunkY * childSize;
+    const childMaxY = childMinY + childSize;
     const childMinZ = child.chunkZ * childSize;
     const childMaxZ = childMinZ + childSize;
     return (
       childMinX >= parentMinX &&
       childMaxX <= parentMaxX &&
+      childMinY >= parentMinY &&
+      childMaxY <= parentMaxY &&
       childMinZ >= parentMinZ &&
       childMaxZ <= parentMaxZ
     );
   }
 
-  private buildInitialNodes(cameraPosition: Vector2Like): QuadNode[] {
+  private buildInitialNodes(cameraPosition: Vector3Like): OctreeNode[] {
     const coarseSize = this.chunkWorldSize(this.maxLodIndex);
     const farthest =
       this.derivedLodLevels[this.derivedLodLevels.length - 1];
     const radiusChunks = Math.ceil(farthest.maxDistance / coarseSize) + 2;
     const baseX = Math.floor(cameraPosition.x / coarseSize);
     const baseZ = Math.floor(cameraPosition.z / coarseSize);
-    const nodes = this.generateSpiralOrder(baseX, baseZ, radiusChunks).map(
-      ({ chunkX, chunkZ }) => ({
-        lodIndex: this.maxLodIndex,
-        chunkX,
-        chunkZ,
-      })
+    const horizontalOrder = this.generateSpiralOrder(
+      baseX,
+      baseZ,
+      radiusChunks
     );
-
+    const hasOrigin = horizontalOrder.some(
+      (coords) => coords.chunkX === 0 && coords.chunkZ === 0
+    );
+    if (!hasOrigin) {
+      horizontalOrder.push({ chunkX: 0, chunkZ: 0 });
+    }
+    const nodes: OctreeNode[] = [];
+    for (const coords of horizontalOrder) {
+      const isCenter = coords.chunkX === baseX && coords.chunkZ === baseZ;
+      const isOrigin = coords.chunkX === 0 && coords.chunkZ === 0;
+      for (
+        let chunkY = this.coarseMinChunkY;
+        chunkY <= this.coarseMaxChunkY;
+        chunkY++
+      ) {
+        nodes.push({
+          lodIndex: this.maxLodIndex,
+          chunkX: coords.chunkX,
+          chunkY,
+          chunkZ: coords.chunkZ,
+          forceInclude: isCenter || isOrigin,
+        });
+      }
+    }
     return nodes.reverse();
   }
 
@@ -419,7 +506,7 @@ export class QuadChunkManager {
     return coords;
   }
 
-  private shouldSubdivide(node: QuadNode, distance: number): boolean {
+  private shouldSubdivide(node: OctreeNode, distance: number): boolean {
     if (node.lodIndex === 0) {
       return false;
     }
@@ -427,22 +514,35 @@ export class QuadChunkManager {
     return desiredLod < node.lodIndex;
   }
 
-  private subdivideNode(node: QuadNode): QuadNode[] {
+  private subdivideNode(node: OctreeNode): OctreeNode[] {
     const childLod = node.lodIndex - 1;
     const baseX = node.chunkX * 2;
+    const baseY = node.chunkY * 2;
     const baseZ = node.chunkZ * 2;
-    return [
-      { lodIndex: childLod, chunkX: baseX, chunkZ: baseZ },
-      { lodIndex: childLod, chunkX: baseX + 1, chunkZ: baseZ },
-      { lodIndex: childLod, chunkX: baseX, chunkZ: baseZ + 1 },
-      { lodIndex: childLod, chunkX: baseX + 1, chunkZ: baseZ + 1 },
-    ];
+    const children: OctreeNode[] = [];
+    for (let dz = 0; dz < 2; dz++) {
+      for (let dy = 0; dy < 2; dy++) {
+        for (let dx = 0; dx < 2; dx++) {
+          const child: OctreeNode = {
+            lodIndex: childLod,
+            chunkX: baseX + dx,
+            chunkY: baseY + dy,
+            chunkZ: baseZ + dz,
+          };
+          if (this.isNodeWithinWorld(child)) {
+            children.push(child);
+          }
+        }
+      }
+    }
+    return children;
   }
 
-  private chunkDistance(node: QuadNode, point: Vector2Like): number {
+  private chunkDistance(node: OctreeNode, point: Vector3Like): number {
     return this.chunkDistanceToPoint(
       node.lodIndex,
       node.chunkX,
+      node.chunkY,
       node.chunkZ,
       point
     );
@@ -458,14 +558,22 @@ export class QuadChunkManager {
   }
 
   private requestChunk(descriptor: ChunkDescriptor, plan: ChunkPlan): void {
-    const existing = this.pendingRequests.get(descriptor.key);
-    if (existing) {
+    if (this.pendingRequests.has(descriptor.key)) {
       return;
     }
+    console.debug(
+      "[OctreeChunkManager] request",
+      descriptor.key,
+      descriptor.lodIndex,
+      descriptor.chunkX,
+      descriptor.chunkY,
+      descriptor.chunkZ
+    );
     const requestId = this.nextRequestId++;
     const clone: ChunkDescriptor = {
       lodIndex: descriptor.lodIndex,
       chunkX: descriptor.chunkX,
+      chunkY: descriptor.chunkY,
       chunkZ: descriptor.chunkZ,
       key: descriptor.key,
       color: descriptor.color,
@@ -474,6 +582,33 @@ export class QuadChunkManager {
     };
     this.pendingRequests.set(descriptor.key, { descriptor: clone, requestId });
     plan.requests.push({ descriptor: clone, requestId });
+  }
+
+  private finalizePlan(plan: ChunkPlan): ChunkPlan {
+    plan.requests.sort((a, b) => this.compareDescriptors(a.descriptor, b.descriptor));
+    plan.cancels.sort();
+    plan.releases.sort();
+    return plan;
+  }
+
+  private compareDescriptors(a: ChunkDescriptor, b: ChunkDescriptor): number {
+    if (a.lodIndex !== b.lodIndex) {
+      return b.lodIndex - a.lodIndex;
+    }
+    const aPriority = this.descriptorPriority(a);
+    const bPriority = this.descriptorPriority(b);
+    if (aPriority !== bPriority) {
+      return aPriority - bPriority;
+    }
+    return a.key.localeCompare(b.key);
+  }
+
+  private descriptorPriority(descriptor: ChunkDescriptor): number {
+    return (
+      Math.abs(descriptor.chunkX) +
+      Math.abs(descriptor.chunkY) +
+      Math.abs(descriptor.chunkZ)
+    );
   }
 
   private cancelPendingRequest(key: string, plan: ChunkPlan): void {
@@ -499,6 +634,11 @@ export class QuadChunkManager {
     childDescriptors: ChunkDescriptor[],
     plan: ChunkPlan
   ): void {
+    console.debug(
+      "[OctreeChunkManager] split",
+      parent.key,
+      childDescriptors.map((child) => child.key)
+    );
     const parentKey = parent.key;
     const missingChildren = new Set<string>();
 
@@ -527,11 +667,14 @@ export class QuadChunkManager {
   ): void {
     this.ensureChunkRequested(parentDescriptor, plan);
     const parentKey = parentDescriptor.key;
-    const childKeys = this.computeChildKeys(
-      parentDescriptor.lodIndex,
-      parentDescriptor.chunkX,
-      parentDescriptor.chunkZ
-    ).filter((childKey) => this.activeChunks.has(childKey));
+    const childKeys = this.computeChildKeys(parentDescriptor).filter((childKey) =>
+      this.activeChunks.has(childKey)
+    );
+    console.debug(
+      "[OctreeChunkManager] schedule merge",
+      parentKey,
+      childKeys
+    );
 
     if (childKeys.length === 0) {
       this.pendingMergeParents.delete(parentKey);
@@ -560,6 +703,7 @@ export class QuadChunkManager {
     const parentKey = this.getParentKey(
       descriptor.lodIndex,
       descriptor.chunkX,
+      descriptor.chunkY,
       descriptor.chunkZ
     );
     if (!parentKey) {
@@ -581,6 +725,11 @@ export class QuadChunkManager {
     if (!children) {
       return;
     }
+    console.debug(
+      "[OctreeChunkManager] merge complete",
+      parentKey,
+      Array.from(children)
+    );
     children.forEach((childKey) => this.disposeChunk(childKey, plan));
     this.pendingMergeParents.delete(parentKey);
   }
@@ -606,16 +755,11 @@ export class QuadChunkManager {
     if (record.lodIndex === 0) {
       return [];
     }
-    const childLod = record.lodIndex - 1;
-    const childKeys = this.computeChildKeys(
-      record.lodIndex,
-      record.chunkX,
-      record.chunkZ
-    );
+    const childKeys = this.computeChildKeys(record);
     return childKeys
       .map((childKey) => desired.get(childKey))
       .filter((descriptor): descriptor is ChunkDescriptor =>
-        Boolean(descriptor && descriptor.lodIndex === childLod)
+        Boolean(descriptor && descriptor.lodIndex === record.lodIndex - 1)
       )
       .sort((a, b) => a.key.localeCompare(b.key));
   }
@@ -630,6 +774,7 @@ export class QuadChunkManager {
     const parentKey = this.getParentKey(
       record.lodIndex,
       record.chunkX,
+      record.chunkY,
       record.chunkZ
     );
     if (!parentKey) {
@@ -645,6 +790,7 @@ export class QuadChunkManager {
   private getParentKey(
     lodIndex: number,
     chunkX: number,
+    chunkY: number,
     chunkZ: number
   ): string | null {
     if (lodIndex >= this.maxLodIndex) {
@@ -652,27 +798,28 @@ export class QuadChunkManager {
     }
     const parentLod = lodIndex + 1;
     const parentX = Math.floor(chunkX / 2);
+    const parentY = Math.floor(chunkY / 2);
     const parentZ = Math.floor(chunkZ / 2);
-    return this.chunkKey(parentLod, parentX, parentZ);
+    return this.chunkKey(parentLod, parentX, parentY, parentZ);
   }
 
-  private computeChildKeys(
-    lodIndex: number,
-    chunkX: number,
-    chunkZ: number
-  ): string[] {
-    if (lodIndex === 0) {
+  private computeChildKeys(record: ChunkDescriptor): string[] {
+    if (record.lodIndex === 0) {
       return [];
     }
-    const childLod = lodIndex - 1;
-    const baseX = chunkX * 2;
-    const baseZ = chunkZ * 2;
-    return [
-      this.chunkKey(childLod, baseX, baseZ),
-      this.chunkKey(childLod, baseX + 1, baseZ),
-      this.chunkKey(childLod, baseX, baseZ + 1),
-      this.chunkKey(childLod, baseX + 1, baseZ + 1),
-    ];
+    const childLod = record.lodIndex - 1;
+    const baseX = record.chunkX * 2;
+    const baseY = record.chunkY * 2;
+    const baseZ = record.chunkZ * 2;
+    const keys: string[] = [];
+    for (let dz = 0; dz < 2; dz++) {
+      for (let dy = 0; dy < 2; dy++) {
+        for (let dx = 0; dx < 2; dx++) {
+          keys.push(this.chunkKey(childLod, baseX + dx, baseY + dy, baseZ + dz));
+        }
+      }
+    }
+    return keys;
   }
 
   private chunkWorldSize(lodIndex: number): number {
@@ -680,49 +827,70 @@ export class QuadChunkManager {
   }
 
   private chunkDiagonalRadius(lodIndex: number): number {
-    return (this.chunkWorldSize(lodIndex) * Math.SQRT2) / 2;
+    return (this.chunkWorldSize(lodIndex) * Math.sqrt(3)) / 2;
   }
 
-  private chunkKey(lodIndex: number, chunkX: number, chunkZ: number): string {
-    return `${lodIndex}:${chunkX}:${chunkZ}`;
-  }
-
-  private createDescriptor(
+  private chunkKey(
     lodIndex: number,
     chunkX: number,
+    chunkY: number,
     chunkZ: number
-  ): ChunkDescriptor {
-    const level = this.lodLookup.get(lodIndex);
+  ): string {
+    return `${lodIndex}:${chunkX}:${chunkY}:${chunkZ}`;
+  }
+
+  private createDescriptor(node: OctreeNode): ChunkDescriptor {
+    const level = this.lodLookup.get(node.lodIndex);
     if (!level) {
-      throw new Error(`Missing LOD configuration for level ${lodIndex}`);
+      throw new Error(`Missing LOD configuration for level ${node.lodIndex}`);
     }
+    const samplesPerAxis = this.config.blockWidth << node.lodIndex;
     return {
-      lodIndex,
-      chunkX,
-      chunkZ,
-      key: this.chunkKey(lodIndex, chunkX, chunkZ),
+      lodIndex: node.lodIndex,
+      chunkX: node.chunkX,
+      chunkY: node.chunkY,
+      chunkZ: node.chunkZ,
+      key: this.chunkKey(node.lodIndex, node.chunkX, node.chunkY, node.chunkZ),
       color: level.color,
       transitionFaces: [],
-      originY: this.config.estimateOriginY(lodIndex, chunkX, chunkZ),
+      originY: node.chunkY * samplesPerAxis,
     };
   }
 
   private chunkDistanceToPoint(
     lodIndex: number,
     chunkX: number,
+    chunkY: number,
     chunkZ: number,
-    point: Vector2Like
+    point: Vector3Like
   ): number {
     const size = this.chunkWorldSize(lodIndex);
     const minX = chunkX * size;
-    const maxX = minX + size;
+    const minY = chunkY * size;
     const minZ = chunkZ * size;
+    const maxX = minX + size;
+    const maxY = minY + size;
     const maxZ = minZ + size;
     const dx =
       point.x < minX ? minX - point.x : point.x > maxX ? point.x - maxX : 0;
+    const dy =
+      point.y < minY ? minY - point.y : point.y > maxY ? point.y - maxY : 0;
     const dz =
       point.z < minZ ? minZ - point.z : point.z > maxZ ? point.z - maxZ : 0;
-    return Math.hypot(dx, dz);
+    return Math.hypot(dx, dy, dz);
+  }
+
+  private distanceBetween(a: Vector3Like, b: Vector3Like): number {
+    return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+  }
+
+  private teleportThreshold(): number {
+    const farthest =
+      this.derivedLodLevels[this.derivedLodLevels.length - 1];
+    const coarseSize = this.chunkWorldSize(this.maxLodIndex);
+    const coarseSpan = coarseSize * 8;
+    const lodSpan = farthest.maxDistance * 4;
+    return Math.max(lodSpan, coarseSpan);
   }
 
   private flushAllChunks(plan: ChunkPlan): void {
@@ -736,15 +904,11 @@ export class QuadChunkManager {
     this.pendingMergeParents.clear();
   }
 
-  private distanceBetween(a: Vector2Like, b: Vector2Like): number {
-    return Math.hypot(a.x - b.x, a.z - b.z);
-  }
-
-  private teleportThreshold(): number {
-    const farthest =
-      this.derivedLodLevels[this.derivedLodLevels.length - 1];
-    const coarseSpan = this.chunkWorldSize(this.maxLodIndex) * 4;
-    return Math.max(farthest.maxDistance * 2, coarseSpan);
+  private isNodeWithinWorld(node: OctreeNode): boolean {
+    const size = this.chunkWorldSize(node.lodIndex);
+    const minY = node.chunkY * size;
+    const maxY = minY + size;
+    return maxY > this.worldMinY && minY < this.worldMaxY;
   }
 
   private createPlan(): ChunkPlan {

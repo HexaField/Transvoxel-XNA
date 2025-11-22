@@ -4,6 +4,7 @@ export type ChunkFieldRequest = {
   key: string;
   lodIndex: number;
   chunkX: number;
+  chunkY: number;
   chunkZ: number;
   originY: number;
   requestId: number;

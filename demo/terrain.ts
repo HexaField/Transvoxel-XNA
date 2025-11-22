@@ -27,13 +27,13 @@ import {
   type DensityFunction,
 } from "../src/volume/volume-data";
 import {
-  QuadChunkManager,
+  OctreeChunkManager,
   type ChunkDescriptor,
   type ChunkRequest,
   type ChunkPlan,
   type TransitionFace,
   type LodLevel,
-} from "./quadChunks";
+} from "./octreeChunks";
 import {
   type ChunkFieldRequest,
   type ChunkFieldResponse,
@@ -95,8 +95,9 @@ scene.add(densityGroup);
 
 const BLOCK_WIDTH = TransvoxelExtractor.BlockWidth;
 const CELL_SIZE = 1;
-const VERTEX_DENSITY_RATIO = 5;
-const SURFACE_HEADROOM = 3; // accounts for high-frequency strata offset in density field
+const WORLD_MIN_Y = -64;
+const WORLD_MAX_Y = 128;
+const VERTEX_DENSITY_RATIO = 1.5;
 const DENSITY_SAMPLE_STRIDE_BASE = 2;
 
 const densitySphereGeometry = new SphereGeometry(0.35, 6, 6);
@@ -117,7 +118,7 @@ const densityTransformScratch = new Object3D();
 const chunkWorldSize = (lodIndex: number): number =>
   CELL_SIZE * (BLOCK_WIDTH << lodIndex);
 const chunkDiagonalRadius = (lodIndex: number): number =>
-  (chunkWorldSize(lodIndex) * Math.SQRT2) / 2;
+  (chunkWorldSize(lodIndex) * Math.sqrt(3)) / 2;
 
 const deriveLodLevels = (): LodLevel[] => {
   const entries = [
@@ -134,15 +135,17 @@ const deriveLodLevels = (): LodLevel[] => {
 const LOD_LEVELS: LodLevel[] = deriveLodLevels();
 const MAX_LOD_INDEX = LOD_LEVELS[LOD_LEVELS.length - 1].lodIndex;
 const LOD_LOOKUP = new Map(LOD_LEVELS.map((level) => [level.lodIndex, level]));
-const chunkKey = (lodIndex: number, chunkX: number, chunkZ: number): string =>
-  `${lodIndex}:${chunkX}:${chunkZ}`;
+const chunkKey = (
+  lodIndex: number,
+  chunkX: number,
+  chunkY: number,
+  chunkZ: number
+): string => `${lodIndex}:${chunkX}:${chunkY}:${chunkZ}`;
 
 interface DensityGenerator {
   id: DensityGeneratorId;
   label: string;
   supportsGpu: boolean;
-  headroom: number;
-  estimateSurfaceHeight: (x: number, z: number) => number;
 }
 
 interface ScheduledChunkRequest extends ChunkRequest {
@@ -229,22 +232,16 @@ const DENSITY_GENERATORS: DensityGenerator[] = [
     id: "terrain",
     label: "Procedural Terrain",
     supportsGpu: true,
-    headroom: SURFACE_HEADROOM,
-    estimateSurfaceHeight: terrainHeightEstimate,
   },
   {
     id: "plateaus",
     label: "Rippled Plateau",
     supportsGpu: false,
-    headroom: 4,
-    estimateSurfaceHeight: plateauHeightEstimate,
   },
   {
     id: "spheres",
     label: "Floating Spheres",
     supportsGpu: false,
-    headroom: 2,
-    estimateSurfaceHeight: floatingSphereSurfaceEstimate,
   },
 ];
 
@@ -252,32 +249,17 @@ const generatorLookup = new Map(
   DENSITY_GENERATORS.map((generator) => [generator.id, generator])
 );
 
-const computeChunkOrigin = (
-  generator: DensityGenerator,
-  lodIndex: number,
-  chunkX: number,
-  chunkZ: number
-): number => {
-  const chunkSize = BLOCK_WIDTH << lodIndex;
-  const centerX = (chunkX + 0.5) * chunkSize;
-  const centerZ = (chunkZ + 0.5) * chunkSize;
-  const estimatedSurface =
-    generator.estimateSurfaceHeight(centerX, centerZ) + generator.headroom;
-  const verticalPadding = Math.max(16, chunkSize * 0.75);
-  return Math.floor(estimatedSurface - verticalPadding);
-};
-
 let activeGenerator: DensityGenerator = DENSITY_GENERATORS[0];
 let generatorToken = 0;
 let densityVisualizationEnabled = false;
 
-const createChunkScheduler = (): QuadChunkManager =>
-  new QuadChunkManager({
+const createChunkScheduler = (): OctreeChunkManager =>
+  new OctreeChunkManager({
     blockWidth: BLOCK_WIDTH,
     cellSize: CELL_SIZE,
     lodLevels: LOD_LEVELS,
-    estimateOriginY: (lodIndex, chunkX, chunkZ) =>
-      computeChunkOrigin(activeGenerator, lodIndex, chunkX, chunkZ),
+    worldMinY: WORLD_MIN_Y,
+    worldMaxY: WORLD_MAX_Y,
   });
 
 type ChunkWorkerRequest = ChunkFieldRequest;
@@ -290,6 +272,7 @@ interface ChunkRecord {
   transitionHash: string;
   lodIndex: number;
   chunkX: number;
+  chunkY: number;
   chunkZ: number;
   color: number;
   originY: number;
@@ -319,7 +302,7 @@ const pendingBuilds = new Map<string, PendingChunkRequest>();
 const buildQueue: ScheduledChunkRequest[] = [];
 let inflightBuilds = 0;
 const MAX_INFLIGHT_BUILDS = 1;
-const currentCameraXZ = { x: 0, z: 0 };
+const currentCameraPosition = { x: 0, y: 0, z: 0 };
 let chunkScheduler = createChunkScheduler();
 
 const attachWorkerHandler = (worker: Worker): void => {
@@ -396,12 +379,10 @@ const setActiveGenerator = (generatorId: DensityGeneratorId): void => {
 };
 
 function updateTerrain(cameraPosition: Vector3): void {
-  currentCameraXZ.x = cameraPosition.x;
-  currentCameraXZ.z = cameraPosition.z;
-  const plan = chunkScheduler.update({
-    x: cameraPosition.x,
-    z: cameraPosition.z,
-  });
+  currentCameraPosition.x = cameraPosition.x;
+  currentCameraPosition.y = cameraPosition.y;
+  currentCameraPosition.z = cameraPosition.z;
+  const plan = chunkScheduler.update(currentCameraPosition);
   applyChunkPlan(plan);
 }
 
@@ -466,8 +447,12 @@ function reorderBuildQueue(): void {
 function chunkRequestDistance(request: ChunkRequest): number {
   const size = chunkWorldSize(request.descriptor.lodIndex);
   const centerX = (request.descriptor.chunkX + 0.5) * size;
+  const centerY = (request.descriptor.chunkY + 0.5) * size;
   const centerZ = (request.descriptor.chunkZ + 0.5) * size;
-  return Math.hypot(centerX - currentCameraXZ.x, centerZ - currentCameraXZ.z);
+  const dx = centerX - currentCameraPosition.x;
+  const dy = centerY - currentCameraPosition.y;
+  const dz = centerZ - currentCameraPosition.z;
+  return Math.hypot(dx, dy, dz);
 }
 
 function dispatchBuilds(): void {
@@ -483,6 +468,7 @@ function dispatchBuilds(): void {
       key: request.descriptor.key,
       lodIndex: request.descriptor.lodIndex,
       chunkX: request.descriptor.chunkX,
+      chunkY: request.descriptor.chunkY,
       chunkZ: request.descriptor.chunkZ,
       originY: request.descriptor.originY,
       requestId: request.requestId,
@@ -603,6 +589,7 @@ function buildChunkRecord(
     transitionHash: transitionSignature(descriptor.transitionFaces),
     lodIndex: descriptor.lodIndex,
     chunkX: descriptor.chunkX,
+    chunkY: descriptor.chunkY,
     chunkZ: descriptor.chunkZ,
     color: descriptor.color,
     originY: descriptor.originY,
@@ -687,29 +674,37 @@ function parentKeyFor(record: ChunkRecord): string | null {
   }
   const parentLod = record.lodIndex + 1;
   const parentX = Math.floor(record.chunkX / 2);
+  const parentY = Math.floor(record.chunkY / 2);
   const parentZ = Math.floor(record.chunkZ / 2);
-  return chunkKey(parentLod, parentX, parentZ);
+  return chunkKey(parentLod, parentX, parentY, parentZ);
 }
 
 function parseChunkKey(
   key: string
-): { lodIndex: number; chunkX: number; chunkZ: number } | null {
+): { lodIndex: number; chunkX: number; chunkY: number; chunkZ: number } | null {
   const parts = key.split(":");
-  if (parts.length !== 3) {
+  if (parts.length !== 4) {
     return null;
   }
   const lodIndex = Number(parts[0]);
   const chunkX = Number(parts[1]);
-  const chunkZ = Number(parts[2]);
-  if (Number.isNaN(lodIndex) || Number.isNaN(chunkX) || Number.isNaN(chunkZ)) {
+  const chunkY = Number(parts[2]);
+  const chunkZ = Number(parts[3]);
+  if (
+    Number.isNaN(lodIndex) ||
+    Number.isNaN(chunkX) ||
+    Number.isNaN(chunkY) ||
+    Number.isNaN(chunkZ)
+  ) {
     return null;
   }
-  return { lodIndex, chunkX, chunkZ };
+  return { lodIndex, chunkX, chunkY, chunkZ };
 }
 
 function childKeysForParent(parent: {
   lodIndex: number;
   chunkX: number;
+  chunkY: number;
   chunkZ: number;
 }): string[] {
   if (parent.lodIndex === 0) {
@@ -717,13 +712,17 @@ function childKeysForParent(parent: {
   }
   const childLod = parent.lodIndex - 1;
   const baseX = parent.chunkX * 2;
+  const baseY = parent.chunkY * 2;
   const baseZ = parent.chunkZ * 2;
-  return [
-    chunkKey(childLod, baseX, baseZ),
-    chunkKey(childLod, baseX + 1, baseZ),
-    chunkKey(childLod, baseX, baseZ + 1),
-    chunkKey(childLod, baseX + 1, baseZ + 1),
-  ];
+  const keys: string[] = [];
+  for (let dz = 0; dz < 2; dz++) {
+    for (let dy = 0; dy < 2; dy++) {
+      for (let dx = 0; dx < 2; dx++) {
+        keys.push(chunkKey(childLod, baseX + dx, baseY + dy, baseZ + dz));
+      }
+    }
+  }
+  return keys;
 }
 
 function updateTerrainStats(): void {
@@ -923,13 +922,14 @@ function createChunkWorker(): Worker {
     const FLOATING_SPHERE_SWAY_FREQUENCY = ${FLOATING_SPHERE_SWAY_FREQUENCY};
 
     self.onmessage = (event) => {
-      const { key, lodIndex, chunkX, chunkZ, originY, requestId, generatorId, generatorToken } = event.data;
+      const { key, lodIndex, chunkX, chunkY, chunkZ, originY, requestId, generatorId, generatorToken } = event.data;
       const range = BLOCK_WIDTH << lodIndex;
       const transitionReach = lodIndex === 0 ? 1 : ((1 << (lodIndex - 1)) * 2 + 1);
       const padding = Math.max(1, transitionReach);
       const sampleSize = range + padding * 2 + 1;
       const minX = chunkX * range - padding;
-      const minY = originY - padding;
+      const baseOriginY = originY ?? chunkY * range;
+      const minY = baseOriginY - padding;
       const minZ = chunkZ * range - padding;
       const totalSamples = sampleSize * sampleSize * sampleSize;
       const data = new Int8Array(totalSamples);
