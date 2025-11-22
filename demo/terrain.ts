@@ -21,6 +21,7 @@ import {
 import {
   QuadChunkManager,
   type ChunkDescriptor,
+  type ChunkRequest,
   type ChunkPlan,
   type TransitionFace,
   type LodLevel,
@@ -189,6 +190,10 @@ const mesher = new TransvoxelMesher();
 const chunkWorker: Worker = createChunkWorker();
 const activeChunks = new Map<string, ChunkRecord>();
 const pendingBuilds = new Map<string, PendingChunkRequest>();
+const buildQueue: ChunkRequest[] = [];
+let inflightBuilds = 0;
+const MAX_INFLIGHT_BUILDS = 1;
+const currentCameraXZ = { x: 0, z: 0 };
 const chunkScheduler = new QuadChunkManager({
   blockWidth: BLOCK_WIDTH,
   cellSize: CELL_SIZE,
@@ -201,16 +206,18 @@ chunkWorker.onmessage = (event: MessageEvent<ChunkWorkerResponse>) => {
 };
 
 function updateTerrain(cameraPosition: Vector3): void {
+  currentCameraXZ.x = cameraPosition.x;
+  currentCameraXZ.z = cameraPosition.z;
   const plan = chunkScheduler.update({
     x: cameraPosition.x,
     z: cameraPosition.z,
   });
   applyChunkPlan(plan);
-  updateTerrainStats();
 }
 
 function applyChunkPlan(plan: ChunkPlan): void {
   for (const key of plan.cancels) {
+    removeFromBuildQueue(key);
     pendingBuilds.delete(key);
   }
 
@@ -219,6 +226,55 @@ function applyChunkPlan(plan: ChunkPlan): void {
   }
 
   for (const request of plan.requests) {
+    enqueueBuildRequest(request);
+  }
+
+  reorderBuildQueue();
+  dispatchBuilds();
+  updateTerrainStats();
+}
+
+function enqueueBuildRequest(request: ChunkRequest): void {
+  const key = request.descriptor.key;
+  if (pendingBuilds.has(key)) {
+    return;
+  }
+  removeFromBuildQueue(key);
+  buildQueue.push(request);
+}
+
+function removeFromBuildQueue(key: string): void {
+  const index = buildQueue.findIndex((queued) => queued.descriptor.key === key);
+  if (index !== -1) {
+    buildQueue.splice(index, 1);
+  }
+}
+
+function reorderBuildQueue(): void {
+  buildQueue.sort((a, b) => {
+    const lodDiff = a.descriptor.lodIndex - b.descriptor.lodIndex;
+    if (lodDiff !== 0) {
+      return lodDiff;
+    }
+    const distanceDiff =
+      chunkRequestDistance(a) - chunkRequestDistance(b);
+    if (distanceDiff !== 0) {
+      return distanceDiff;
+    }
+    return a.descriptor.key.localeCompare(b.descriptor.key);
+  });
+}
+
+function chunkRequestDistance(request: ChunkRequest): number {
+  const size = chunkWorldSize(request.descriptor.lodIndex);
+  const centerX = (request.descriptor.chunkX + 0.5) * size;
+  const centerZ = (request.descriptor.chunkZ + 0.5) * size;
+  return Math.hypot(centerX - currentCameraXZ.x, centerZ - currentCameraXZ.z);
+}
+
+function dispatchBuilds(): void {
+  while (inflightBuilds < MAX_INFLIGHT_BUILDS && buildQueue.length > 0) {
+    const request = buildQueue.shift()!;
     pendingBuilds.set(request.descriptor.key, {
       descriptor: request.descriptor,
       requestId: request.requestId,
@@ -232,16 +288,22 @@ function applyChunkPlan(plan: ChunkPlan): void {
       requestId: request.requestId,
     };
     chunkWorker.postMessage(workerRequest);
+    inflightBuilds++;
   }
 }
 
 function handleWorkerMessage(message: ChunkWorkerResponse): void {
   const pending = pendingBuilds.get(message.key);
+  pendingBuilds.delete(message.key);
+  if (inflightBuilds > 0) {
+    inflightBuilds--;
+  }
+  dispatchBuilds();
+  updateTerrainStats();
+
   if (!pending || pending.requestId !== message.requestId) {
     return;
   }
-
-  pendingBuilds.delete(message.key);
 
   const sampler = createChunkFieldSampler({
     data: new Int8Array(message.buffer),
@@ -337,7 +399,8 @@ function releaseChunkResources(record: ChunkRecord): void {
 
 function updateTerrainStats(): void {
   if (statsLabel) {
-    statsLabel.textContent = `${activeChunks.size} active chunks (${pendingBuilds.size} building)`;
+    const building = pendingBuilds.size + buildQueue.length;
+    statsLabel.textContent = `${activeChunks.size} active chunks (${building} building)`;
   }
 }
 

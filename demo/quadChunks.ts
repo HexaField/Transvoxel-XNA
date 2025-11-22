@@ -90,9 +90,14 @@ export class QuadChunkManager {
   }
 
   update(cameraPosition: Vector2Like): ChunkPlan {
+    const previousPosition = this.lastCameraPosition;
+    const teleported = previousPosition
+      ? this.distanceBetween(previousPosition, cameraPosition) >
+        this.teleportThreshold()
+      : false;
     this.lastCameraPosition = { x: cameraPosition.x, z: cameraPosition.z };
     const desired = this.collectDesiredChunks(cameraPosition);
-    const plan = this.reconcile(desired);
+    const plan = this.reconcile(desired, teleported);
     this.desiredChunkKeys = new Set(desired.keys());
     return plan;
   }
@@ -134,8 +139,15 @@ export class QuadChunkManager {
     return this.pendingRequests.get(key)?.descriptor;
   }
 
-  private reconcile(desired: Map<string, ChunkDescriptor>): ChunkPlan {
+  private reconcile(
+    desired: Map<string, ChunkDescriptor>,
+    teleported: boolean
+  ): ChunkPlan {
     const plan = this.createPlan();
+
+    if (teleported) {
+      this.flushAllChunks(plan);
+    }
 
     for (const [key, record] of this.activeChunks.entries()) {
       if (desired.has(key)) {
@@ -623,6 +635,27 @@ export class QuadChunkManager {
     const dx = point.x < minX ? minX - point.x : point.x > maxX ? point.x - maxX : 0;
     const dz = point.z < minZ ? minZ - point.z : point.z > maxZ ? point.z - maxZ : 0;
     return Math.hypot(dx, dz);
+  }
+
+  private flushAllChunks(plan: ChunkPlan): void {
+    for (const key of Array.from(this.activeChunks.keys())) {
+      this.disposeChunk(key, plan);
+    }
+    for (const key of Array.from(this.pendingRequests.keys())) {
+      this.cancelPendingRequest(key, plan);
+    }
+    this.retainedParents.clear();
+    this.pendingMergeParents.clear();
+  }
+
+  private distanceBetween(a: Vector2Like, b: Vector2Like): number {
+    return Math.hypot(a.x - b.x, a.z - b.z);
+  }
+
+  private teleportThreshold(): number {
+    const farthest = this.config.lodLevels[this.config.lodLevels.length - 1];
+    const coarseSpan = this.chunkWorldSize(this.maxLodIndex) * 4;
+    return Math.max(farthest.maxDistance * 2, coarseSpan);
   }
 
   private createPlan(): ChunkPlan {
