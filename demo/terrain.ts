@@ -11,18 +11,20 @@ import {
 } from "three";
 import type { Vector3 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import {
-  TransvoxelExtractor,
-  TransvoxelMesher,
-  type TransitionFace,
-} from "../src/surface-extractor/transvoxel-extractor";
+import { TransvoxelExtractor, TransvoxelMesher } from "../src/surface-extractor/transvoxel-extractor";
 import { Vector3i } from "../src/math/vector3i";
-import { Vector3f } from "../src/math/vector3f";
 import { meshDataToGeometry } from "./mesh-utils";
 import {
   createChunkFieldSampler,
   type DensityFunction,
 } from "../src/volume/volume-data";
+import {
+  QuadChunkManager,
+  type ChunkDescriptor,
+  type ChunkPlan,
+  type TransitionFace,
+  type LodLevel,
+} from "./quadChunks";
 
 const mount = document.querySelector<HTMLDivElement>("#app");
 if (!mount) {
@@ -66,14 +68,6 @@ scene.add(rimLight);
 
 const BLOCK_WIDTH = TransvoxelExtractor.BlockWidth;
 const CELL_SIZE = 1;
-const CHUNK_ORIGIN_Y = 0;
-
-interface LodLevel {
-  lodIndex: number;
-  color: number;
-  maxDistance: number;
-}
-
 const LOD_LEVELS: LodLevel[] = [
   { lodIndex: 0, color: 0xff0000, maxDistance: 48 }, // red - fine detail
   { lodIndex: 1, color: 0x00ff00, maxDistance: 120 }, // green - medium detail
@@ -141,12 +135,26 @@ const terrainHeightEstimate = (x: number, z: number): number => {
   return 8 + hills + ridges + dunes;
 };
 
+const estimateOriginY = (
+  lodIndex: number,
+  chunkX: number,
+  chunkZ: number
+): number => {
+  const chunkSize = BLOCK_WIDTH << lodIndex;
+  const centerX = (chunkX + 0.5) * chunkSize;
+  const centerZ = (chunkZ + 0.5) * chunkSize;
+  const estimatedSurface = terrainHeightEstimate(centerX, centerZ);
+  const verticalPadding = Math.max(16, chunkSize * 0.75);
+  return Math.floor(estimatedSurface - verticalPadding);
+};
+
 type ChunkWorkerRequest = {
   key: string;
   lodIndex: number;
   chunkX: number;
   chunkZ: number;
   originY: number;
+  requestId: number;
 };
 
 type ChunkWorkerResponse = {
@@ -156,6 +164,7 @@ type ChunkWorkerResponse = {
   minZ: number;
   size: number;
   buffer: ArrayBuffer;
+  requestId: number;
 };
 
 interface ChunkRecord {
@@ -170,557 +179,177 @@ interface ChunkRecord {
   originY: number;
 }
 
-interface ChunkDescriptor {
-  lodIndex: number;
-  chunkX: number;
-  chunkZ: number;
-  key: string;
-  color: number;
-  transitionFaces: TransitionFace[];
-  originY: number;
+interface PendingChunkRequest {
+  descriptor: ChunkDescriptor;
+  requestId: number;
 }
 
-interface QuadNode {
-  lodIndex: number;
-  chunkX: number;
-  chunkZ: number;
+
+const mesher = new TransvoxelMesher();
+const chunkWorker: Worker = createChunkWorker();
+const activeChunks = new Map<string, ChunkRecord>();
+const pendingBuilds = new Map<string, PendingChunkRequest>();
+const chunkScheduler = new QuadChunkManager({
+  blockWidth: BLOCK_WIDTH,
+  cellSize: CELL_SIZE,
+  lodLevels: LOD_LEVELS,
+  estimateOriginY,
+});
+
+chunkWorker.onmessage = (event: MessageEvent<ChunkWorkerResponse>) => {
+  handleWorkerMessage(event.data as ChunkWorkerResponse);
+};
+
+function updateTerrain(cameraPosition: Vector3): void {
+  const plan = chunkScheduler.update({
+    x: cameraPosition.x,
+    z: cameraPosition.z,
+  });
+  applyChunkPlan(plan);
+  updateTerrainStats();
 }
 
-interface CoverageCell {
-  ownerKey: string;
-  lodIndex: number;
+function applyChunkPlan(plan: ChunkPlan): void {
+  for (const key of plan.cancels) {
+    pendingBuilds.delete(key);
+  }
+
+  for (const key of plan.releases) {
+    disposeChunk(key);
+  }
+
+  for (const request of plan.requests) {
+    pendingBuilds.set(request.descriptor.key, {
+      descriptor: request.descriptor,
+      requestId: request.requestId,
+    });
+    const workerRequest: ChunkWorkerRequest = {
+      key: request.descriptor.key,
+      lodIndex: request.descriptor.lodIndex,
+      chunkX: request.descriptor.chunkX,
+      chunkZ: request.descriptor.chunkZ,
+      originY: request.descriptor.originY,
+      requestId: request.requestId,
+    };
+    chunkWorker.postMessage(workerRequest);
+  }
 }
 
-class ChunkManager {
-  private readonly mesher = new TransvoxelMesher();
-  private readonly worker = createChunkWorker();
-  private readonly chunks = new Map<string, ChunkRecord>();
-  private readonly pending = new Map<string, ChunkDescriptor>();
-  private readonly lastDesiredDescriptors = new Map<string, string>();
-  private lastCameraPosition: { x: number; z: number } | null = null;
-
-  constructor(
-    private readonly root: Scene,
-    private readonly statsTarget: HTMLParagraphElement | null
-  ) {
-    this.worker.onmessage = (event: MessageEvent<ChunkWorkerResponse>) => {
-      this.handleWorkerMessage(event.data as ChunkWorkerResponse);
-    };
+function handleWorkerMessage(message: ChunkWorkerResponse): void {
+  const pending = pendingBuilds.get(message.key);
+  if (!pending || pending.requestId !== message.requestId) {
+    return;
   }
 
-  update(cameraPosition: Vector3): void {
-    this.lastCameraPosition = { x: cameraPosition.x, z: cameraPosition.z };
-    const desired = this.collectDesiredChunks(cameraPosition);
-    if (this.hasDesiredChanged(desired)) {
-      this.reconcileChunks(desired);
-      this.captureDesiredDescriptors(desired);
-    }
-    this.updateStats();
+  pendingBuilds.delete(message.key);
+
+  const sampler = createChunkFieldSampler({
+    data: new Int8Array(message.buffer),
+    minX: message.minX,
+    minY: message.minY,
+    minZ: message.minZ,
+    size: message.size,
+  });
+
+  const descriptor = pending.descriptor;
+  const record = buildChunkRecord(descriptor, sampler);
+  const outcome = record ? "mesh" : "empty";
+
+  if (record) {
+    addChunkToScene(record);
   }
 
-  private collectDesiredChunks(
-    cameraPosition: Vector3
-  ): Map<string, ChunkDescriptor> {
-    const desired = new Map<string, ChunkDescriptor>();
-    const coverage = new Map<string, CoverageCell>();
-    const queue = this.buildInitialNodes(cameraPosition);
+  const finalizePlan = chunkScheduler.finalizeRequest({
+    descriptor,
+    requestId: pending.requestId,
+    outcome,
+  });
+  applyChunkPlan(finalizePlan);
+}
 
-    while (queue.length) {
-      const node = queue.pop()!;
-      const level = LOD_LOOKUP.get(node.lodIndex);
-      if (!level) {
-        continue;
-      }
+function buildChunkRecord(
+  descriptor: ChunkDescriptor,
+  sampler: DensityFunction
+): ChunkRecord | null {
+  const cellScale = 1 << descriptor.lodIndex;
+  const samplesPerAxis = BLOCK_WIDTH * cellScale;
+  const origin = new Vector3i(
+    descriptor.chunkX * samplesPerAxis,
+    descriptor.originY,
+    descriptor.chunkZ * samplesPerAxis
+  );
 
-      const center = this.chunkCenter(node);
-      const distance = Math.hypot(
-        center.x - cameraPosition.x,
-        center.z - cameraPosition.z
-      );
-      const radius = chunkDiagonalRadius(node.lodIndex);
+  const meshData = mesher.extractBlock(sampler, {
+    origin,
+    lodIndex: descriptor.lodIndex,
+    cellSize: CELL_SIZE,
+    transitionFaces: descriptor.transitionFaces,
+  });
 
-      if (distance - radius > level.maxDistance) {
-        continue;
-      }
-
-      if (this.shouldSubdivide(node, distance, radius)) {
-        this.subdivideNode(node).forEach((child) => queue.push(child));
-        continue;
-      }
-
-      const key = chunkKey(node.lodIndex, node.chunkX, node.chunkZ);
-      desired.set(key, {
-        lodIndex: node.lodIndex,
-        chunkX: node.chunkX,
-        chunkZ: node.chunkZ,
-        key,
-        color: level.color,
-        transitionFaces: [],
-        originY: this.estimateOriginY(node.lodIndex, node.chunkX, node.chunkZ),
-      });
-      this.markCoverage(coverage, node.chunkX, node.chunkZ, node.lodIndex, key);
-    }
-
-    this.assignTransitionFaces(desired, coverage);
-    return desired;
-  }
-
-  private buildInitialNodes(cameraPosition: Vector3): QuadNode[] {
-    const nodes: QuadNode[] = [];
-    const coarseSize = chunkWorldSize(MAX_LOD_INDEX);
-    const radiusChunks =
-      Math.ceil(LOD_LEVELS[LOD_LEVELS.length - 1].maxDistance / coarseSize) + 2;
-    const baseX = Math.floor(cameraPosition.x / coarseSize);
-    const baseZ = Math.floor(cameraPosition.z / coarseSize);
-
-    for (let dx = -radiusChunks; dx <= radiusChunks; dx++) {
-      for (let dz = -radiusChunks; dz <= radiusChunks; dz++) {
-        nodes.push({
-          lodIndex: MAX_LOD_INDEX,
-          chunkX: baseX + dx,
-          chunkZ: baseZ + dz,
-        });
-      }
-    }
-
-    return nodes;
-  }
-
-  private shouldSubdivide(
-    node: QuadNode,
-    distance: number,
-    radius: number
-  ): boolean {
-    if (node.lodIndex === 0) {
-      return false;
-    }
-
-    const childLevel = LOD_LOOKUP.get(node.lodIndex - 1);
-    if (!childLevel) {
-      return false;
-    }
-
-    return distance - radius < childLevel.maxDistance;
-  }
-
-  private subdivideNode(node: QuadNode): QuadNode[] {
-    const childLod = node.lodIndex - 1;
-    const baseX = node.chunkX * 2;
-    const baseZ = node.chunkZ * 2;
-    return [
-      { lodIndex: childLod, chunkX: baseX, chunkZ: baseZ },
-      { lodIndex: childLod, chunkX: baseX + 1, chunkZ: baseZ },
-      { lodIndex: childLod, chunkX: baseX, chunkZ: baseZ + 1 },
-      { lodIndex: childLod, chunkX: baseX + 1, chunkZ: baseZ + 1 },
-    ];
-  }
-
-  private chunkCenter(node: QuadNode): { x: number; z: number } {
-    const size = chunkWorldSize(node.lodIndex);
-    return {
-      x: (node.chunkX + 0.5) * size,
-      z: (node.chunkZ + 0.5) * size,
-    };
-  }
-
-  private estimateOriginY(
-    lodIndex: number,
-    chunkX: number,
-    chunkZ: number
-  ): number {
-    const size = chunkWorldSize(lodIndex);
-    const minX = chunkX * size;
-    const minZ = chunkZ * size;
-    const samplePoints: Array<{ x: number; z: number }> = [
-      { x: minX, z: minZ },
-      { x: minX + size, z: minZ },
-      { x: minX, z: minZ + size },
-      { x: minX + size, z: minZ + size },
-      { x: minX + size * 0.5, z: minZ + size * 0.5 },
-    ];
-
-    let minHeight = Infinity;
-    let maxHeight = -Infinity;
-    for (const point of samplePoints) {
-      const height = terrainHeightEstimate(point.x, point.z);
-      if (height < minHeight) {
-        minHeight = height;
-      }
-      if (height > maxHeight) {
-        maxHeight = height;
-      }
-    }
-
-    if (!Number.isFinite(minHeight) || !Number.isFinite(maxHeight)) {
-      return CHUNK_ORIGIN_Y;
-    }
-
-    const margin = Math.min(size * 0.25, 12);
-    const desiredMin = minHeight - margin;
-    const desiredMax = maxHeight + margin;
-    const span = desiredMax - desiredMin;
-
-    if (span <= size) {
-      return Math.floor(desiredMin);
-    }
-
-    const shift = (span - size) * 0.5;
-    return Math.floor(desiredMin + shift);
-  }
-
-  private markCoverage(
-    coverage: Map<string, CoverageCell>,
-    chunkX: number,
-    chunkZ: number,
-    lodIndex: number,
-    ownerKey: string
-  ): void {
-    const scale = 1 << lodIndex;
-    const startX = chunkX * scale;
-    const startZ = chunkZ * scale;
-    for (let x = 0; x < scale; x++) {
-      for (let z = 0; z < scale; z++) {
-        const key = this.baseCoverageKey(startX + x, startZ + z);
-        coverage.set(key, { ownerKey, lodIndex });
-      }
-    }
-  }
-
-  private assignTransitionFaces(
-    desired: Map<string, ChunkDescriptor>,
-    coverage: Map<string, CoverageCell>
-  ): void {
-    for (const descriptor of desired.values()) {
-      if (descriptor.lodIndex === 0) {
-        descriptor.transitionFaces = [];
-        continue;
-      }
-
-      const faces: TransitionFace[] = [];
-      if (this.hasHigherDetailNeighbor(descriptor, coverage, "x", -1)) {
-        faces.push("negativeX");
-      }
-      if (this.hasHigherDetailNeighbor(descriptor, coverage, "x", 1)) {
-        faces.push("positiveX");
-      }
-      if (this.hasHigherDetailNeighbor(descriptor, coverage, "z", -1)) {
-        faces.push("negativeZ");
-      }
-      if (this.hasHigherDetailNeighbor(descriptor, coverage, "z", 1)) {
-        faces.push("positiveZ");
-      }
-
-      descriptor.transitionFaces = faces;
-    }
-  }
-
-  private hasHigherDetailNeighbor(
-    descriptor: ChunkDescriptor,
-    coverage: Map<string, CoverageCell>,
-    axis: "x" | "z",
-    direction: -1 | 1
-  ): boolean {
-    const scale = 1 << descriptor.lodIndex;
-    const startX = descriptor.chunkX * scale;
-    const startZ = descriptor.chunkZ * scale;
-    const endX = startX + scale - 1;
-    const endZ = startZ + scale - 1;
-
-    if (axis === "x") {
-      const neighborX = direction === -1 ? startX - 1 : endX + 1;
-      for (let z = startZ; z <= endZ; z++) {
-        const cell = coverage.get(this.baseCoverageKey(neighborX, z));
-        if (cell && cell.lodIndex < descriptor.lodIndex) {
-          return true;
-        }
-      }
-    } else {
-      const neighborZ = direction === -1 ? startZ - 1 : endZ + 1;
-      for (let x = startX; x <= endX; x++) {
-        const cell = coverage.get(this.baseCoverageKey(x, neighborZ));
-        if (cell && cell.lodIndex < descriptor.lodIndex) {
-          return true;
-        }
-      }
-    }
-
-    return false;
-  }
-
-  private baseCoverageKey(x: number, z: number): string {
-    return `${x}:${z}`;
-  }
-
-  private reconcileChunks(desired: Map<string, ChunkDescriptor>): void {
-    for (const existingKey of Array.from(this.chunks.keys())) {
-      if (!desired.has(existingKey)) {
-        const record = this.chunks.get(existingKey);
-        if (!record) {
-          continue;
-        }
-
-        const replacement = this.findOverlappingDescriptor(record, desired);
-        if (replacement) {
-          if (replacement.lodIndex !== record.lodIndex) {
-            this.disposeChunk(existingKey);
-          }
-          continue;
-        }
-
-        if (this.shouldCullChunk(record)) {
-          this.disposeChunk(existingKey);
-        }
-      }
-    }
-
-    for (const pendingKey of Array.from(this.pending.keys())) {
-      if (!desired.has(pendingKey)) {
-        this.pending.delete(pendingKey);
-      }
-    }
-
-    for (const descriptor of desired.values()) {
-      const desiredHash = this.transitionSignature(descriptor.transitionFaces);
-      const existing = this.chunks.get(descriptor.key);
-      if (existing) {
-        if (existing.transitionHash !== desiredHash) {
-          this.disposeChunk(descriptor.key);
-        } else {
-          continue;
-        }
-      }
-
-      const pendingDescriptor = this.pending.get(descriptor.key);
-      if (pendingDescriptor) {
-        const pendingHash = this.transitionSignature(
-          pendingDescriptor.transitionFaces
-        );
-        if (pendingHash !== desiredHash) {
-          this.pending.set(descriptor.key, {
-            ...descriptor,
-            transitionFaces: [...descriptor.transitionFaces],
-          });
-        }
-        continue;
-      }
-      this.requestChunk(descriptor);
-    }
-  }
-
-  private hasDesiredChanged(desired: Map<string, ChunkDescriptor>): boolean {
-    if (desired.size !== this.lastDesiredDescriptors.size) {
-      return true;
-    }
-
-    for (const [key, descriptor] of desired.entries()) {
-      const signature = this.transitionSignature(descriptor.transitionFaces);
-      if (this.lastDesiredDescriptors.get(key) !== signature) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  private captureDesiredDescriptors(
-    desired: Map<string, ChunkDescriptor>
-  ): void {
-    this.lastDesiredDescriptors.clear();
-    for (const [key, descriptor] of desired.entries()) {
-      this.lastDesiredDescriptors.set(
-        key,
-        this.transitionSignature(descriptor.transitionFaces)
-      );
-    }
-  }
-
-  private requestChunk(descriptor: ChunkDescriptor): void {
-    this.pending.set(descriptor.key, {
-      ...descriptor,
-      transitionFaces: [...descriptor.transitionFaces],
-    });
-    const request: ChunkWorkerRequest = {
-      key: descriptor.key,
-      lodIndex: descriptor.lodIndex,
-      chunkX: descriptor.chunkX,
-      chunkZ: descriptor.chunkZ,
-      originY: descriptor.originY,
-    };
-    this.worker.postMessage(request);
-  }
-
-  private handleWorkerMessage(message: ChunkWorkerResponse): void {
-    const descriptor = this.pending.get(message.key);
-    if (!descriptor) {
-      return;
-    }
-
-    this.pending.delete(message.key);
-    if (this.chunks.has(message.key)) {
-      return;
-    }
-    const sampler = createChunkFieldSampler({
-      data: new Int8Array(message.buffer),
-      minX: message.minX,
-      minY: message.minY,
-      minZ: message.minZ,
-      size: message.size,
-    });
-    this.buildChunk(descriptor, sampler);
-  }
-
-  private buildChunk(
-    descriptor: ChunkDescriptor,
-    sampler: DensityFunction
-  ): void {
-    const cellScale = 1 << descriptor.lodIndex;
-    const samplesPerAxis = BLOCK_WIDTH * cellScale;
-    const origin = new Vector3i(
-      descriptor.chunkX * samplesPerAxis,
-      descriptor.originY,
-      descriptor.chunkZ * samplesPerAxis
-    );
-
-    const meshData = this.mesher.extractBlock(sampler, {
-      origin,
-      lodIndex: descriptor.lodIndex,
-      cellSize: CELL_SIZE,
-      transitionFaces: descriptor.transitionFaces,
-    });
-
-    if (meshData.indices.length === 0) {
-      return;
-    }
-
-    const built = meshDataToGeometry(meshData);
-    const material = new MeshStandardMaterial({
-      color: descriptor.color,
-      roughness: 0.9,
-      metalness: 0.05,
-      flatShading: true,
-    });
-    const mesh = new Mesh(built.geometry, material);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-
-    this.root.add(mesh);
-    this.chunks.set(descriptor.key, {
-      mesh,
-      material,
-      key: descriptor.key,
-      transitionHash: this.transitionSignature(descriptor.transitionFaces),
-      lodIndex: descriptor.lodIndex,
-      chunkX: descriptor.chunkX,
-      chunkZ: descriptor.chunkZ,
-      color: descriptor.color,
-      originY: descriptor.originY,
-    });
-  }
-
-  private disposeChunk(key: string): void {
-    const record = this.chunks.get(key);
-    if (!record) {
-      return;
-    }
-
-    this.root.remove(record.mesh);
-    record.mesh.geometry.dispose();
-    record.material.dispose();
-    this.chunks.delete(key);
-  }
-
-  private updateStats(): void {
-    if (this.statsTarget) {
-      this.statsTarget.textContent = `${this.chunks.size} active chunks (${this.pending.size} building)`;
-    }
-  }
-
-  private findOverlappingDescriptor(
-    record: ChunkRecord,
-    desired: Map<string, ChunkDescriptor>
-  ): ChunkDescriptor | null {
-    const bounds = this.chunkBounds(
-      record.lodIndex,
-      record.chunkX,
-      record.chunkZ
-    );
-    for (const descriptor of desired.values()) {
-      const other = this.chunkBounds(
-        descriptor.lodIndex,
-        descriptor.chunkX,
-        descriptor.chunkZ
-      );
-      if (this.boundsIntersect(bounds, other)) {
-        return descriptor;
-      }
-    }
+  if (meshData.indices.length === 0) {
     return null;
   }
 
-  private chunkBounds(
-    lodIndex: number,
-    chunkX: number,
-    chunkZ: number
-  ): {
-    minX: number;
-    maxX: number;
-    minZ: number;
-    maxZ: number;
-  } {
-    const size = chunkWorldSize(lodIndex);
-    const minX = chunkX * size;
-    const minZ = chunkZ * size;
-    return {
-      minX,
-      maxX: minX + size,
-      minZ,
-      maxZ: minZ + size,
-    };
+  const built = meshDataToGeometry(meshData);
+  const material = new MeshStandardMaterial({
+    color: descriptor.color,
+    roughness: 0.9,
+    metalness: 0.05,
+    flatShading: true,
+  });
+  const mesh = new Mesh(built.geometry, material);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+
+  return {
+    mesh,
+    material,
+    key: descriptor.key,
+    transitionHash: transitionSignature(descriptor.transitionFaces),
+    lodIndex: descriptor.lodIndex,
+    chunkX: descriptor.chunkX,
+    chunkZ: descriptor.chunkZ,
+    color: descriptor.color,
+    originY: descriptor.originY,
+  };
+}
+
+function addChunkToScene(record: ChunkRecord): void {
+  scene.add(record.mesh);
+  activeChunks.set(record.key, record);
+}
+
+function disposeChunk(key: string): void {
+  const record = activeChunks.get(key);
+  if (!record) {
+    return;
   }
 
-  private boundsIntersect(
-    a: { minX: number; maxX: number; minZ: number; maxZ: number },
-    b: { minX: number; maxX: number; minZ: number; maxZ: number }
-  ): boolean {
-    return !(
-      a.maxX <= b.minX ||
-      a.minX >= b.maxX ||
-      a.maxZ <= b.minZ ||
-      a.minZ >= b.maxZ
-    );
-  }
+  releaseChunkResources(record);
+  activeChunks.delete(key);
+}
 
-  private shouldCullChunk(record: ChunkRecord): boolean {
-    if (!this.lastCameraPosition) {
-      return false;
-    }
+function releaseChunkResources(record: ChunkRecord): void {
+  scene.remove(record.mesh);
+  record.mesh.geometry.dispose();
+  record.material.dispose();
+}
 
-    const centerX = (record.chunkX + 0.5) * chunkWorldSize(record.lodIndex);
-    const centerZ = (record.chunkZ + 0.5) * chunkWorldSize(record.lodIndex);
-    const distance = Math.hypot(
-      centerX - this.lastCameraPosition.x,
-      centerZ - this.lastCameraPosition.z
-    );
-    const level = LOD_LOOKUP.get(record.lodIndex);
-    const maxDistance = level
-      ? level.maxDistance
-      : chunkWorldSize(record.lodIndex) * 4;
-    return distance - chunkDiagonalRadius(record.lodIndex) > maxDistance * 1.5;
-  }
-
-  private transitionSignature(faces: TransitionFace[]): string {
-    if (faces.length === 0) {
-      return "none";
-    }
-    return faces.slice().sort().join(",");
+function updateTerrainStats(): void {
+  if (statsLabel) {
+    statsLabel.textContent = `${activeChunks.size} active chunks (${pendingBuilds.size} building)`;
   }
 }
 
-const chunkManager = new ChunkManager(scene, statsLabel);
-
+function transitionSignature(faces: TransitionFace[]): string {
+  if (faces.length === 0) {
+    return "none";
+  }
+  return faces.slice().sort().join(",");
+}
 const animate = () => {
   controls.update();
-  chunkManager.update(controls.target);
+  updateTerrain(controls.target);
   renderer.render(scene, camera);
   requestAnimationFrame(animate);
 };
@@ -740,7 +369,7 @@ function createChunkWorker(): Worker {
     const BLOCK_WIDTH = ${TransvoxelExtractor.BlockWidth};
 
     self.onmessage = (event) => {
-      const { key, lodIndex, chunkX, chunkZ, originY } = event.data;
+      const { key, lodIndex, chunkX, chunkZ, originY, requestId } = event.data;
       const range = BLOCK_WIDTH << lodIndex;
       const transitionReach = lodIndex === 0 ? 1 : ((1 << (lodIndex - 1)) * 2 + 1);
       const padding = Math.max(1, transitionReach);
@@ -763,7 +392,7 @@ function createChunkWorker(): Worker {
         }
       }
 
-      self.postMessage({ key, minX, minY, minZ, size: sampleSize, buffer: data.buffer }, [data.buffer]);
+      self.postMessage({ key, minX, minY, minZ, size: sampleSize, buffer: data.buffer, requestId }, [data.buffer]);
     };
 
     function sampleTerrainDensity(x, y, z) {
