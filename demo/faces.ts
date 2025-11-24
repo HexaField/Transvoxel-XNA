@@ -122,7 +122,6 @@ transitionBitOrder.forEach((positionIndex, bitIndex) => {
   const key = vectorKey(canonicalTransitionPositions[positionIndex])
   transitionCoordinateBitLookup.set(key, bitIndex)
 })
-
 ;[
   [9, 0],
   [10, 2],
