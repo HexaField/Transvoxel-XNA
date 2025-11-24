@@ -32,7 +32,6 @@ import {
   type ChunkDescriptor,
   type ChunkRequest,
   type ChunkPlan,
-  type TransitionFace,
   type LodLevel,
 } from "./octreeChunks";
 import {
@@ -117,8 +116,6 @@ const densityColorNegative = new Color("#ff8c8c");
 const densityColorNeutral = new Color("#7b7b7b");
 const densityColorScratch = new Color();
 const densityTransformScratch = new Object3D();
-const transitionBlendScratch = new Color();
-const transitionTempScratch = new Color();
 
 const chunkWorldSize = (lodIndex: number): number =>
   CELL_SIZE * (BLOCK_WIDTH << lodIndex);
@@ -147,14 +144,6 @@ const chunkKey = (
   chunkZ: number
 ): string => `${lodIndex}:${chunkX}:${chunkY}:${chunkZ}`;
 
-const TRANSITION_FACE_COLORS: Record<TransitionFace, number> = {
-  negativeX: 0xff6b6b,
-  positiveX: 0xffb347,
-  negativeY: 0x3dd598,
-  positiveY: 0x1f9dff,
-  negativeZ: 0xd96bff,
-  positiveZ: 0xffd700,
-};
 
 interface DensityGenerator {
   id: DensityGeneratorId;
@@ -282,16 +271,12 @@ type ChunkWorkerResponse = ChunkFieldResponse;
 interface ChunkRecord {
   mesh?: Mesh;
   material?: MeshStandardMaterial;
-  transitionMesh?: Mesh;
-  transitionMaterial?: MeshStandardMaterial;
   key: string;
-  transitionHash: string;
   lodIndex: number;
   chunkX: number;
   chunkY: number;
   chunkZ: number;
   color: number;
-  transitionColor?: number;
   originY: number;
   generatorId: DensityGeneratorId;
   descriptor: ChunkDescriptor;
@@ -577,75 +562,40 @@ function buildChunkRecord(
     descriptor.chunkZ * samplesPerAxis
   );
 
-  const regularMeshData = mesher.extractRegularBlock(sampler, {
+  const transitionFaces =
+    descriptor.lodIndex > 0 ? descriptor.transitionFaces : undefined;
+
+  const mergedMeshData = mesher.extractBlock(sampler, {
     origin,
     lodIndex: descriptor.lodIndex,
     cellSize: CELL_SIZE,
+    transitionFaces,
   });
 
-  const shouldBuildTransitions =
-    descriptor.transitionFaces.length > 0 && descriptor.lodIndex > 0;
-  const transitionMeshData = shouldBuildTransitions
-    ? mesher.extractTransitionFaces(sampler, {
-        origin,
-        lodIndex: descriptor.lodIndex,
-        cellSize: CELL_SIZE,
-        faces: descriptor.transitionFaces,
-      })
-    : null;
-
-  if (
-    regularMeshData.indices.length === 0 &&
-    (!transitionMeshData || transitionMeshData.indices.length === 0)
-  ) {
+  if (mergedMeshData.indices.length === 0) {
     return null;
   }
 
-  let mesh: Mesh | undefined;
-  let material: MeshStandardMaterial | undefined;
-  if (regularMeshData.indices.length > 0) {
-    const built = meshDataToGeometry(regularMeshData);
-    material = new MeshStandardMaterial({
-      color: descriptor.color,
-      roughness: 0.9,
-      metalness: 0.05,
-      flatShading: true,
-    });
-    mesh = new Mesh(built.geometry, material);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-  }
-
-  let transitionMesh: Mesh | undefined;
-  let transitionMaterial: MeshStandardMaterial | undefined;
-  let transitionColor: number | undefined;
-  if (transitionMeshData && transitionMeshData.indices.length > 0) {
-    const builtTransitions = meshDataToGeometry(transitionMeshData);
-    transitionColor = transitionColorForDescriptor(descriptor);
-    transitionMaterial = new MeshStandardMaterial({
-      color: transitionColor,
-      roughness: 0.7,
-      metalness: 0.05,
-      flatShading: true,
-    });
-    transitionMesh = new Mesh(builtTransitions.geometry, transitionMaterial);
-    transitionMesh.castShadow = true;
-    transitionMesh.receiveShadow = true;
-  }
+  const built = meshDataToGeometry(mergedMeshData);
+  const material = new MeshStandardMaterial({
+    color: descriptor.color,
+    roughness: 0.9,
+    metalness: 0.05,
+    flatShading: true,
+  });
+  const mesh = new Mesh(built.geometry, material);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
 
   return {
     mesh,
     material,
-    transitionMesh,
-    transitionMaterial,
     key: descriptor.key,
-    transitionHash: transitionSignature(descriptor.transitionFaces),
     lodIndex: descriptor.lodIndex,
     chunkX: descriptor.chunkX,
     chunkY: descriptor.chunkY,
     chunkZ: descriptor.chunkZ,
     color: descriptor.color,
-    transitionColor,
     originY: descriptor.originY,
     generatorId,
     descriptor,
@@ -655,9 +605,6 @@ function buildChunkRecord(
 function addChunkToScene(record: ChunkRecord): void {
   if (record.mesh) {
     scene.add(record.mesh);
-  }
-  if (record.transitionMesh) {
-    scene.add(record.transitionMesh);
   }
   activeChunks.set(record.key, record);
   refreshDensityForRecord(record);
@@ -682,15 +629,6 @@ function releaseChunkResources(record: ChunkRecord): void {
   if (record.material) {
     record.material.dispose();
     record.material = undefined;
-  }
-  if (record.transitionMesh) {
-    scene.remove(record.transitionMesh);
-    record.transitionMesh.geometry.dispose();
-    record.transitionMesh = undefined;
-  }
-  if (record.transitionMaterial) {
-    record.transitionMaterial.dispose();
-    record.transitionMaterial = undefined;
   }
   if (record.densityMesh) {
     densityGroup.remove(record.densityMesh);
@@ -959,26 +897,6 @@ if (densityToggle) {
   setDensityVisualizationEnabled(false);
 }
 
-function transitionSignature(faces: TransitionFace[]): string {
-  if (faces.length === 0) {
-    return "none";
-  }
-  return faces.slice().sort().join(",");
-}
-
-function transitionColorForDescriptor(descriptor: ChunkDescriptor): number {
-  if (descriptor.transitionFaces.length === 0) {
-    return descriptor.color;
-  }
-  transitionBlendScratch.setRGB(0, 0, 0);
-  descriptor.transitionFaces.forEach((face) => {
-    const tint = TRANSITION_FACE_COLORS[face] ?? descriptor.color;
-    transitionTempScratch.set(tint);
-    transitionBlendScratch.add(transitionTempScratch);
-  });
-  transitionBlendScratch.multiplyScalar(1 / descriptor.transitionFaces.length);
-  return transitionBlendScratch.getHex();
-}
 const animate = () => {
   controls.update();
   updateTerrain(controls.target);
