@@ -3,8 +3,18 @@
   "version": "0.1.0",
   "description": "TypeScript port of the Transvoxel algorithm",
   "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js"
+    }
+  },
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run clean && rollup -c",
     "clean": "rm -rf dist",
     "check-errors": "tsc --noEmit",
     "format": "prettier --write \"src/*\" \"demo/*\"",
@@ -22,13 +32,19 @@
     "typescript"
   ],
   "license": "MIT",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
   "devDependencies": {
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-typescript": "^11.1.6",
     "@types/node": "^24.10.1",
     "@types/three": "^0.169.0",
     "@webgpu/types": "^0.1.66",
     "dotenv": "^17.2.3",
     "prettier": "^3.6.2",
     "prettier-plugin-organize-imports": "^4.3.0",
+    "rollup": "^4.24.0",
+    "rollup-plugin-dts": "^6.1.0",
     "three": "^0.169.0",
     "typescript": "^5.6.3",
     "vite": "^5.4.8",
