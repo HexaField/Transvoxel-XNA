@@ -7,9 +7,10 @@ import {
 } from "../src/surface-extractor/transvoxel-extractor";
 import type { DensityFunction } from "../src/volume/volume-data";
 import { Vector3i } from "../src/math/vector3i";
-import { getRenderablePosition } from "../src/surface-extractor/vertex";
+import { getRenderablePosition, unusedVertexPosition } from "../src/surface-extractor/vertex";
 import type { MeshData } from "../src/surface-extractor/mesh-data";
 import type { Vector3f } from "../src/math/vector3f";
+import type { TransvoxelVertex } from "../src/surface-extractor/vertex";
 
 const BLOCK_WIDTH = TransvoxelExtractor.BlockWidth;
 const COARSE_LOD = 1;
@@ -57,8 +58,6 @@ describe("transition seams", () => {
       const direction = directionForFace(face);
       const seamCoordinate = direction === -1 ? 0 : coarseExtent;
       const coarseOrigin = Vector3i.zero;
-      const highOrigin = buildHighOrigin(axis, direction);
-
       const transitionMesh = mesher.extractTransitionFaces(sphereField, {
         origin: coarseOrigin,
         lodIndex: COARSE_LOD,
@@ -68,39 +67,88 @@ describe("transition seams", () => {
 
       expect(transitionMesh.vertices.length).toBeGreaterThan(0);
 
-      const highMesh = mesher.extractRegularBlock(sphereField, {
-        origin: highOrigin,
-        lodIndex: FINE_LOD,
-        cellSize: 1,
-      });
+      const [t0, t1] = tangentialAxes[axis];
+      const offsets = [0, fineExtent];
 
-      expect(highMesh.vertices.length).toBeGreaterThan(0);
+      for (const offset0 of offsets) {
+        for (const offset1 of offsets) {
+          const highOrigin = buildHighOrigin(axis, direction, {
+            [t0]: offset0,
+            [t1]: offset1,
+          });
 
-      const tangentialBounds = buildTangentialBounds(axis, highOrigin);
-      const transitionEdges = collectSeamEdges(
-        transitionMesh,
-        axis,
-        seamCoordinate,
-        tangentialBounds
-      );
-      const highEdges = collectSeamEdges(
-        highMesh,
-        axis,
-        seamCoordinate,
-        tangentialBounds
-      );
+          const highMesh = mesher.extractRegularBlock(sphereField, {
+            origin: highOrigin,
+            lodIndex: FINE_LOD,
+            cellSize: 1,
+          });
 
-      expect(transitionEdges.size).toBeGreaterThan(0);
-      expect(highEdges.size).toBeGreaterThan(0);
+          expect(highMesh.vertices.length).toBeGreaterThan(0);
 
-      const missing: string[] = [];
-      transitionEdges.forEach((_count, key) => {
-        if (!highEdges.has(key)) {
-          missing.push(key);
+          const tangentialBounds = buildTangentialBounds(axis, highOrigin);
+          const transitionEdges = collectSeamEdges(
+            transitionMesh,
+            axis,
+            seamCoordinate,
+            tangentialBounds
+          );
+          const highEdges = collectSeamEdges(
+            highMesh,
+            axis,
+            seamCoordinate,
+            tangentialBounds
+          );
+
+          expect(transitionEdges.size).toBeGreaterThan(0);
+          expect(highEdges.size).toBeGreaterThan(0);
+
+          const missing: string[] = [];
+          transitionEdges.forEach((_count, key) => {
+            if (!highEdges.has(key)) {
+              missing.push(key);
+            }
+          });
+
+          if (missing.length > 0) {
+            const extra: string[] = [];
+            highEdges.forEach((_count, key) => {
+              if (!transitionEdges.has(key)) {
+                extra.push(key);
+              }
+            });
+            const diffs = missing.slice(0, 2).map((key) => {
+              const closest = findClosestDifference(key, highEdges);
+              return closest
+                ? {
+                    key,
+                    diff: {
+                      key: closest.key,
+                      diffA: closest.diffA,
+                      diffB: closest.diffB,
+                    },
+                  }
+                : { key, diff: null };
+            });
+            console.log(
+              "missing",
+              JSON.stringify(
+                {
+              face,
+              axis,
+              direction,
+              offsets: { [t0]: offset0, [t1]: offset1 },
+              missing,
+              extra,
+              diffs,
+                },
+                null,
+                2
+              )
+            );
+          }
+          expect(missing).toHaveLength(0);
         }
-      });
-
-      expect(missing).toHaveLength(0);
+      }
     });
   }
 });
@@ -115,16 +163,17 @@ function createSphereField(radius: number, center: number): DensityFunction {
   };
 }
 
-function buildHighOrigin(axis: AxisKey, direction: -1 | 1): Vector3i {
-  const offset = direction === -1 ? -fineExtent : coarseExtent;
-  switch (axis) {
-    case "x":
-      return new Vector3i(offset, 0, 0);
-    case "y":
-      return new Vector3i(0, offset, 0);
-    default:
-      return new Vector3i(0, 0, offset);
-  }
+function buildHighOrigin(
+  axis: AxisKey,
+  direction: -1 | 1,
+  tangentialOffsets?: Partial<Record<AxisKey, number>>
+): Vector3i {
+  const components: Record<AxisKey, number> = { x: 0, y: 0, z: 0 };
+  components[axis] = direction === -1 ? -fineExtent : coarseExtent;
+  const [t0, t1] = tangentialAxes[axis];
+  components[t0] = tangentialOffsets?.[t0] ?? 0;
+  components[t1] = tangentialOffsets?.[t1] ?? 0;
+  return new Vector3i(components.x, components.y, components.z);
 }
 
 type Bounds = Record<AxisKey, { min: number; max: number }>;
@@ -168,9 +217,9 @@ function collectSeamEdges(
   const { vertices, indices } = mesh;
   const epsilon = 1e-3;
   for (let i = 0; i < indices.length; i += 3) {
-    const a = getRenderablePosition(vertices[indices[i]]);
-    const b = getRenderablePosition(vertices[indices[i + 1]]);
-    const c = getRenderablePosition(vertices[indices[i + 2]]);
+    const a = vertices[indices[i]];
+    const b = vertices[indices[i + 1]];
+    const c = vertices[indices[i + 2]];
     processEdge(a, b, edges, axis, seamCoordinate, tangentialBounds, epsilon);
     processEdge(b, c, edges, axis, seamCoordinate, tangentialBounds, epsilon);
     processEdge(c, a, edges, axis, seamCoordinate, tangentialBounds, epsilon);
@@ -179,14 +228,19 @@ function collectSeamEdges(
 }
 
 function processEdge(
-  start: Vector3f,
-  end: Vector3f,
+  startVertex: TransvoxelVertex,
+  endVertex: TransvoxelVertex,
   edges: Map<string, number>,
   axis: AxisKey,
   seamCoordinate: number,
   tangentialBounds: Bounds,
   epsilon: number
 ): void {
+  if (startVertex.primary === unusedVertexPosition || endVertex.primary === unusedVertexPosition) {
+    return;
+  }
+  const start = getRenderablePosition(startVertex);
+  const end = getRenderablePosition(endVertex);
   if (!isOnSeam(start, axis, seamCoordinate, epsilon)) {
     return;
   }
@@ -248,4 +302,51 @@ function edgeKey(a: Vector3f, b: Vector3f): string {
 
 function vertexKey(point: Vector3f): string {
   return `${quantize(point.x)},${quantize(point.y)},${quantize(point.z)}`;
+}
+
+type EdgePoints = [Vector3f, Vector3f];
+
+interface EdgeDifference {
+  key: string;
+  diffA: Vector3f;
+  diffB: Vector3f;
+}
+
+function parseEdgeKey(key: string): EdgePoints {
+  const [a, b] = key.split("|");
+  return [parsePoint(a), parsePoint(b)];
+}
+
+function parsePoint(value: string): Vector3f {
+  const [x, y, z] = value.split(",").map(Number);
+  return { x, y, z } as Vector3f;
+}
+
+function findClosestDifference(key: string, candidates: Map<string, number>): EdgeDifference | null {
+  const [ta, tb] = parseEdgeKey(key);
+  let closest: EdgeDifference | null = null;
+  let closestDistance = Infinity;
+  candidates.forEach((_count, candidateKey) => {
+    const [ca, cb] = parseEdgeKey(candidateKey);
+    const diffA = subtractVectors(ca, ta);
+    const diffB = subtractVectors(cb, tb);
+    const distance = diffMagnitude(diffA) + diffMagnitude(diffB);
+    if (distance < closestDistance) {
+      closestDistance = distance;
+      closest = {
+        key: candidateKey,
+        diffA,
+        diffB,
+      };
+    }
+  });
+  return closest;
+}
+
+function subtractVectors(a: Vector3f, b: Vector3f): Vector3f {
+  return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z } as Vector3f;
+}
+
+function diffMagnitude(diff: Vector3f): number {
+  return Math.abs(diff.x) + Math.abs(diff.y) + Math.abs(diff.z);
 }

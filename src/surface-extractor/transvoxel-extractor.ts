@@ -118,28 +118,45 @@ const interpolate = (
   samples: DensityFunction,
   lodIndex = 0
 ): Vector3f => {
-  let s0 = sample(samples, p0);
-  let s1 = sample(samples, p1);
+  let vStart = v0;
+  let vEnd = v1;
+  let pStart = p0;
+  let pEnd = p1;
+
+  const shouldSwap =
+    pEnd.x < pStart.x ||
+    (pEnd.x === pStart.x && pEnd.y < pStart.y) ||
+    (pEnd.x === pStart.x && pEnd.y === pStart.y && pEnd.z < pStart.z);
+
+  if (shouldSwap) {
+    vStart = v1;
+    vEnd = v0;
+    pStart = p1;
+    pEnd = p0;
+  }
+
+  let s0 = sample(samples, pStart);
+  let s1 = sample(samples, pEnd);
 
   let t = intDiv(s1 << 8, s1 - s0);
   let u = 0x0100 - t;
 
   if ((t & 0x00ff) === 0) {
-    return t === 0 ? v1 : v0;
+    return t === 0 ? vEnd : vStart;
   }
 
   for (let i = 0; i < lodIndex; i++) {
-    const vm = v0.add(v1).divideScalar(2);
-    const pm = new Vector3i((p0.x + p1.x) >> 1, (p0.y + p1.y) >> 1, (p0.z + p1.z) >> 1);
+    const vm = vStart.add(vEnd).divideScalar(2);
+    const pm = new Vector3i((pStart.x + pEnd.x) >> 1, (pStart.y + pEnd.y) >> 1, (pStart.z + pEnd.z) >> 1);
     const sm = sample(samples, pm);
 
     if (signBit(s0) !== signBit(sm)) {
-      v1 = vm;
-      p1 = pm;
+      vEnd = vm;
+      pEnd = pm;
       s1 = sm;
     } else {
-      v0 = vm;
-      p0 = pm;
+      vStart = vm;
+      pStart = pm;
       s0 = sm;
     }
   }
@@ -147,7 +164,7 @@ const interpolate = (
   t = intDiv(s1 << 8, s1 - s0);
   u = 0x0100 - t;
 
-  return v0.multiplyScalar(t * S).add(v1.multiplyScalar(u * S));
+  return vStart.multiplyScalar(t * S).add(vEnd.multiplyScalar(u * S));
 };
 
 const buildCornerPositions = (min: Vector3i, lodScale: number): Vector3i[] =>
@@ -206,12 +223,21 @@ interface TransitionFaceDescriptor {
 const blockVector = (x: number, y: number, z: number): Vector3i =>
   new Vector3i(x, y, z);
 
+const crossVector3i = (a: Vector3i, b: Vector3i): Vector3i =>
+  new Vector3i(
+    a.y * b.z - a.z * b.y,
+    a.z * b.x - a.x * b.z,
+    a.x * b.y - a.y * b.x
+  );
+
+const dotVector3i = (a: Vector3i, b: Vector3i): number => a.x * b.x + a.y * b.y + a.z * b.z;
+
 const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor> = {
   negativeX: {
     axis: 0,
     direction: -1,
-    originOffset: blockVector(0, 0, 0),
-    localX: blockVector(0, 0, 1),
+    originOffset: blockVector(0, 0, BLOCK_WIDTH),
+    localX: blockVector(0, 0, -1),
     localY: blockVector(0, 1, 0),
     localZ: blockVector(1, 0, 0),
   },
@@ -226,9 +252,9 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
   negativeY: {
     axis: 1,
     direction: -1,
-    originOffset: blockVector(0, 0, 0),
+    originOffset: blockVector(0, 0, BLOCK_WIDTH),
     localX: blockVector(1, 0, 0),
-    localY: blockVector(0, 0, 1),
+    localY: blockVector(0, 0, -1),
     localZ: blockVector(0, 1, 0),
   },
   positiveY: {
@@ -250,9 +276,9 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
   positiveZ: {
     axis: 2,
     direction: 1,
-    originOffset: blockVector(0, 0, BLOCK_WIDTH),
+    originOffset: blockVector(0, BLOCK_WIDTH, BLOCK_WIDTH),
     localX: blockVector(1, 0, 0),
-    localY: blockVector(0, 1, 0),
+    localY: blockVector(0, -1, 0),
     localZ: blockVector(0, 0, -1),
   },
 };
@@ -381,6 +407,8 @@ export class TransvoxelMesher {
     const stride = sampleStep << 1;
 
     const faceOrigin = origin.add(descriptor.originOffset.multiplyScalar(lodScale));
+    const orientation = dotVector3i(crossVector3i(descriptor.localX, descriptor.localY), descriptor.localZ);
+    const invertWinding = orientation > 0;
 
     for (let y = 0; y < BLOCK_WIDTH; y++) {
       const rowOrigin = faceOrigin.add(descriptor.localY.multiplyScalar(y * stride));
@@ -403,7 +431,8 @@ export class TransvoxelMesher {
           verts,
           indices,
           this.transitionCache,
-          origin
+          origin,
+          invertWinding
         );
       }
     }
@@ -589,7 +618,8 @@ export class TransvoxelExtractor {
     verts: TransvoxelVertex[],
     indices: number[],
     cache: TransitionCache,
-    blockOrigin: Vector3i
+    blockOrigin: Vector3i,
+    invertWinding = false
   ): number {
     if (lodIndex < 1) {
       throw new RangeError("Transition cells require lodIndex >= 1.");
@@ -620,9 +650,7 @@ export class TransvoxelExtractor {
       Vector3f.fromVector3i(mz)
     );
 
-    const positions = transitionCoordinates.map((coord) =>
-      origin.add(basis.multiplyVector3i(coord))
-    );
+    const positions = transitionCoordinates.map((coord) => origin.add(basis.multiplyVector3i(coord)));
 
     const normals = new Array<Vector3f>(13);
     for (let i = 0; i < 9; i++) {
@@ -675,6 +703,7 @@ export class TransvoxelExtractor {
     const classIndex = Tables.TransitionCellClass[caseCode];
     const cellData = Tables.TransitionRegularCellData[classIndex & 0x7f];
     const inverse = (classIndex & 0x80) !== 0;
+    const finalInverse = inverse !== invertWinding;
     const localVertexMapping = new Array<number>(12).fill(-1);
     const vertexCount = cellData.getVertexCount();
     const triangleCount = cellData.getTriangleCount();
@@ -784,7 +813,7 @@ export class TransvoxelExtractor {
 
     const cellIndices = cellData.indices();
     for (let t = 0; t < triangleCount; t++) {
-      if (inverse) {
+      if (finalInverse) {
         indices.push(
           localVertexMapping[cellIndices[t * 3 + 2]],
           localVertexMapping[cellIndices[t * 3 + 1]],

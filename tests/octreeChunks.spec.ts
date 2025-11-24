@@ -266,6 +266,29 @@ describe("OctreeChunkManager", () => {
     expect(finePositiveZ.transitionFaces).toHaveLength(0);
   });
 
+  it("assigns transition faces along negative axes", () => {
+    const blockWidth = 2;
+    const manager = createManager({
+      blockWidth,
+      lodLevels: TRANSITION_TEST_LODS,
+      worldMinY: 0,
+      worldMaxY: blockWidth << 1,
+    });
+    const desired = new Map<string, ChunkDescriptor>();
+    const coarse = descriptorFor(blockWidth, 1, 0, 0, 0, 0x00ff00);
+    const fineNegativeX = descriptorFor(blockWidth, 0, -1, 0, 0, 0xff0000);
+    const fineNegativeZ = descriptorFor(blockWidth, 0, 0, 0, -1, 0xff0000);
+    desired.set(coarse.key, coarse);
+    desired.set(fineNegativeX.key, fineNegativeX);
+    desired.set(fineNegativeZ.key, fineNegativeZ);
+
+    (manager as any).assignTransitionFaces(desired);
+
+    expect(coarse.transitionFaces).toEqual(["negativeX", "negativeZ"]);
+    expect(fineNegativeX.transitionFaces).toHaveLength(0);
+    expect(fineNegativeZ.transitionFaces).toHaveLength(0);
+  });
+
   it("leaves transition faces empty when no finer neighbors touch the chunk", () => {
     const blockWidth = 2;
     const manager = createManager({
