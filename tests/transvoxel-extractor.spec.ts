@@ -87,6 +87,19 @@ const axisKeyForFace = (face: TransitionFace): keyof AxisBounds => {
 const directionForFace = (face: TransitionFace): -1 | 1 =>
   face.startsWith("negative") ? -1 : 1;
 
+const interiorDirectionForFace = (face: TransitionFace): -1 | 1 =>
+  face.startsWith("negative") ? 1 : -1;
+
+const componentForAxis = (vector: Vector3f, axis: keyof AxisBounds): number => {
+  if (axis === "x") {
+    return vector.x;
+  }
+  if (axis === "y") {
+    return vector.y;
+  }
+  return vector.z;
+};
+
 const tangentialAxes: Record<keyof AxisBounds, Array<keyof AxisBounds>> = {
   x: ["y", "z"],
   y: ["x", "z"],
@@ -274,6 +287,51 @@ describe("TransvoxelExtractor", () => {
       expect(bounds.max[axisKey]).toBeGreaterThanOrEqual(axisBoundary - margin);
       expect(bounds.min[axisKey]).toBeGreaterThanOrEqual(axisBoundary - coarseDepth - margin);
       expect(bounds.max[axisKey]).toBeLessThanOrEqual(axisBoundary + coarseDepth + margin);
+    }
+  });
+
+  it("keeps transition vertices on the interior side of the face", () => {
+    const mesher = new TransvoxelMesher();
+    const lodIndex = 2;
+    const lodScale = 1 << lodIndex;
+    const extent = TransvoxelExtractor.BlockWidth * lodScale;
+    const interiorTolerance = 0.5;
+    const minimumInteriorDepth = lodScale * 0.25;
+    const planeOffset = extent * 1.5;
+    const scale = 16;
+    const volume: DensityFunction = (x, y, z) => Math.floor((x + y + z - planeOffset) * scale);
+    const faces: TransitionFace[] = [
+      "negativeX",
+      "positiveX",
+      "negativeY",
+      "positiveY",
+      "negativeZ",
+      "positiveZ",
+    ];
+
+    for (const face of faces) {
+      const mesh = mesher.extractTransitionFaces(volume, {
+        origin: Vector3i.zero,
+        lodIndex,
+        cellSize: 1,
+        faces: [face],
+      });
+
+      expect(mesh.vertices.length).toBeGreaterThan(0);
+      const axisKey = axisKeyForFace(face);
+      const boundary = directionForFace(face) === -1 ? 0 : extent;
+      const interiorDirection = interiorDirectionForFace(face);
+      let maxInteriorDistance = -Infinity;
+
+      for (const vertex of mesh.vertices) {
+        const position = getRenderablePosition(vertex);
+        const axisValue = componentForAxis(position, axisKey);
+        const interiorDistance = (axisValue - boundary) * interiorDirection;
+        expect(interiorDistance).toBeGreaterThanOrEqual(-interiorTolerance);
+        maxInteriorDistance = Math.max(maxInteriorDistance, interiorDistance);
+      }
+
+      expect(maxInteriorDistance).toBeGreaterThanOrEqual(minimumInteriorDepth);
     }
   });
 

@@ -210,10 +210,10 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
   negativeX: {
     axis: 0,
     direction: -1,
-    originOffset: blockVector(0, 0, BLOCK_WIDTH),
-    localX: blockVector(0, 0, -1),
+    originOffset: blockVector(0, 0, 0),
+    localX: blockVector(0, 0, 1),
     localY: blockVector(0, 1, 0),
-    localZ: blockVector(-1, 0, 0),
+    localZ: blockVector(1, 0, 0),
   },
   positiveX: {
     axis: 0,
@@ -221,15 +221,15 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
     originOffset: blockVector(BLOCK_WIDTH, 0, 0),
     localX: blockVector(0, 0, 1),
     localY: blockVector(0, 1, 0),
-    localZ: blockVector(1, 0, 0),
+    localZ: blockVector(-1, 0, 0),
   },
   negativeY: {
     axis: 1,
     direction: -1,
-    originOffset: blockVector(0, 0, BLOCK_WIDTH),
+    originOffset: blockVector(0, 0, 0),
     localX: blockVector(1, 0, 0),
-    localY: blockVector(0, 0, -1),
-    localZ: blockVector(0, -1, 0),
+    localY: blockVector(0, 0, 1),
+    localZ: blockVector(0, 1, 0),
   },
   positiveY: {
     axis: 1,
@@ -237,7 +237,7 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
     originOffset: blockVector(0, BLOCK_WIDTH, 0),
     localX: blockVector(1, 0, 0),
     localY: blockVector(0, 0, 1),
-    localZ: blockVector(0, 1, 0),
+    localZ: blockVector(0, -1, 0),
   },
   negativeZ: {
     axis: 2,
@@ -245,7 +245,7 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
     originOffset: blockVector(0, 0, 0),
     localX: blockVector(1, 0, 0),
     localY: blockVector(0, 1, 0),
-    localZ: blockVector(0, 0, -1),
+    localZ: blockVector(0, 0, 1),
   },
   positiveZ: {
     axis: 2,
@@ -253,7 +253,7 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
     originOffset: blockVector(0, 0, BLOCK_WIDTH),
     localX: blockVector(1, 0, 0),
     localY: blockVector(0, 1, 0),
-    localZ: blockVector(0, 0, 1),
+    localZ: blockVector(0, 0, -1),
   },
 };
 

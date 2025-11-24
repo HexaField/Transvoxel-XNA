@@ -1,5 +1,6 @@
 import {
   AmbientLight,
+  AxesHelper,
   Color,
   DirectionalLight,
   FogExp2,
@@ -93,6 +94,8 @@ const densityGroup = new Group();
 densityGroup.visible = false;
 scene.add(densityGroup);
 
+scene.add(new AxesHelper(10));
+
 const BLOCK_WIDTH = TransvoxelExtractor.BlockWidth;
 const CELL_SIZE = 1;
 const WORLD_MIN_Y = -64;
@@ -116,7 +119,6 @@ const densityColorScratch = new Color();
 const densityTransformScratch = new Object3D();
 const transitionBlendScratch = new Color();
 const transitionTempScratch = new Color();
-const transitionBaseColorScratch = new Color();
 
 const chunkWorldSize = (lodIndex: number): number =>
   CELL_SIZE * (BLOCK_WIDTH << lodIndex);
@@ -278,8 +280,10 @@ type ChunkWorkerRequest = ChunkFieldRequest;
 type ChunkWorkerResponse = ChunkFieldResponse;
 
 interface ChunkRecord {
-  mesh: Mesh;
-  material: MeshStandardMaterial;
+  mesh?: Mesh;
+  material?: MeshStandardMaterial;
+  transitionMesh?: Mesh;
+  transitionMaterial?: MeshStandardMaterial;
   key: string;
   transitionHash: string;
   lodIndex: number;
@@ -287,6 +291,7 @@ interface ChunkRecord {
   chunkY: number;
   chunkZ: number;
   color: number;
+  transitionColor?: number;
   originY: number;
   generatorId: DensityGeneratorId;
   descriptor: ChunkDescriptor;
@@ -572,39 +577,75 @@ function buildChunkRecord(
     descriptor.chunkZ * samplesPerAxis
   );
 
-  const meshData = mesher.extractBlock(sampler, {
+  const regularMeshData = mesher.extractRegularBlock(sampler, {
     origin,
     lodIndex: descriptor.lodIndex,
     cellSize: CELL_SIZE,
-    transitionFaces: descriptor.transitionFaces,
   });
 
-  if (meshData.indices.length === 0) {
+  const shouldBuildTransitions =
+    descriptor.transitionFaces.length > 0 && descriptor.lodIndex > 0;
+  const transitionMeshData = shouldBuildTransitions
+    ? mesher.extractTransitionFaces(sampler, {
+        origin,
+        lodIndex: descriptor.lodIndex,
+        cellSize: CELL_SIZE,
+        faces: descriptor.transitionFaces,
+      })
+    : null;
+
+  if (
+    regularMeshData.indices.length === 0 &&
+    (!transitionMeshData || transitionMeshData.indices.length === 0)
+  ) {
     return null;
   }
 
-  const built = meshDataToGeometry(meshData);
-  const resolvedColor = materialColorForDescriptor(descriptor);
-  const material = new MeshStandardMaterial({
-    color: resolvedColor,
-    roughness: 0.9,
-    metalness: 0.05,
-    flatShading: true,
-  });
-  const mesh = new Mesh(built.geometry, material);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
+  let mesh: Mesh | undefined;
+  let material: MeshStandardMaterial | undefined;
+  if (regularMeshData.indices.length > 0) {
+    const built = meshDataToGeometry(regularMeshData);
+    material = new MeshStandardMaterial({
+      color: descriptor.color,
+      roughness: 0.9,
+      metalness: 0.05,
+      flatShading: true,
+    });
+    mesh = new Mesh(built.geometry, material);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+  }
+
+  let transitionMesh: Mesh | undefined;
+  let transitionMaterial: MeshStandardMaterial | undefined;
+  let transitionColor: number | undefined;
+  if (transitionMeshData && transitionMeshData.indices.length > 0) {
+    const builtTransitions = meshDataToGeometry(transitionMeshData);
+    transitionColor = transitionColorForDescriptor(descriptor);
+    transitionMaterial = new MeshStandardMaterial({
+      color: transitionColor,
+      roughness: 0.7,
+      metalness: 0.05,
+      flatShading: true,
+    });
+    transitionMesh = new Mesh(builtTransitions.geometry, transitionMaterial);
+    transitionMesh.castShadow = true;
+    transitionMesh.receiveShadow = true;
+  }
 
   return {
     mesh,
     material,
+    transitionMesh,
+    transitionMaterial,
     key: descriptor.key,
     transitionHash: transitionSignature(descriptor.transitionFaces),
     lodIndex: descriptor.lodIndex,
     chunkX: descriptor.chunkX,
     chunkY: descriptor.chunkY,
     chunkZ: descriptor.chunkZ,
-    color: resolvedColor,
+    color: descriptor.color,
+    transitionColor,
     originY: descriptor.originY,
     generatorId,
     descriptor,
@@ -612,7 +653,12 @@ function buildChunkRecord(
 }
 
 function addChunkToScene(record: ChunkRecord): void {
-  scene.add(record.mesh);
+  if (record.mesh) {
+    scene.add(record.mesh);
+  }
+  if (record.transitionMesh) {
+    scene.add(record.transitionMesh);
+  }
   activeChunks.set(record.key, record);
   refreshDensityForRecord(record);
 }
@@ -628,9 +674,24 @@ function disposeChunk(key: string): void {
 }
 
 function releaseChunkResources(record: ChunkRecord): void {
-  scene.remove(record.mesh);
-  record.mesh.geometry.dispose();
-  record.material.dispose();
+  if (record.mesh) {
+    scene.remove(record.mesh);
+    record.mesh.geometry.dispose();
+    record.mesh = undefined;
+  }
+  if (record.material) {
+    record.material.dispose();
+    record.material = undefined;
+  }
+  if (record.transitionMesh) {
+    scene.remove(record.transitionMesh);
+    record.transitionMesh.geometry.dispose();
+    record.transitionMesh = undefined;
+  }
+  if (record.transitionMaterial) {
+    record.transitionMaterial.dispose();
+    record.transitionMaterial = undefined;
+  }
   if (record.densityMesh) {
     densityGroup.remove(record.densityMesh);
     record.densityMesh = undefined;
@@ -905,7 +966,7 @@ function transitionSignature(faces: TransitionFace[]): string {
   return faces.slice().sort().join(",");
 }
 
-function materialColorForDescriptor(descriptor: ChunkDescriptor): number {
+function transitionColorForDescriptor(descriptor: ChunkDescriptor): number {
   if (descriptor.transitionFaces.length === 0) {
     return descriptor.color;
   }
@@ -916,9 +977,7 @@ function materialColorForDescriptor(descriptor: ChunkDescriptor): number {
     transitionBlendScratch.add(transitionTempScratch);
   });
   transitionBlendScratch.multiplyScalar(1 / descriptor.transitionFaces.length);
-  transitionBaseColorScratch.set(descriptor.color);
-  transitionBaseColorScratch.lerp(transitionBlendScratch, 0.75);
-  return transitionBaseColorScratch.getHex();
+  return transitionBlendScratch.getHex();
 }
 const animate = () => {
   controls.update();
