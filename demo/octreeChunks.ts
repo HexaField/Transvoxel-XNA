@@ -581,14 +581,6 @@ export class OctreeChunkManager {
     if (this.pendingRequests.has(descriptor.key)) {
       return;
     }
-    console.debug(
-      "[OctreeChunkManager] request",
-      descriptor.key,
-      descriptor.lodIndex,
-      descriptor.chunkX,
-      descriptor.chunkY,
-      descriptor.chunkZ
-    );
     const requestId = this.nextRequestId++;
     const clone: ChunkDescriptor = {
       lodIndex: descriptor.lodIndex,

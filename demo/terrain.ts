@@ -21,7 +21,7 @@ import {
   TransvoxelExtractor,
   TransvoxelMesher,
 } from "../src/surface-extractor/transvoxel-extractor";
-import { Vector3i } from "../src/math/vector3i";
+import { createVector3i } from "../src/math/vector3i";
 import { meshDataToGeometry } from "./mesh-utils";
 import {
   createChunkFieldSampler,
@@ -556,7 +556,7 @@ function buildChunkRecord(
 ): ChunkRecord | null {
   const cellScale = 1 << descriptor.lodIndex;
   const samplesPerAxis = BLOCK_WIDTH * cellScale;
-  const origin = new Vector3i(
+  const origin = createVector3i(
     descriptor.chunkX * samplesPerAxis,
     descriptor.originY,
     descriptor.chunkZ * samplesPerAxis
