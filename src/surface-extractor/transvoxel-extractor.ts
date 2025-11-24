@@ -515,10 +515,10 @@ export class TransvoxelMesher {
   }
 }
 
-export class TransvoxelExtractor {
-  static readonly BlockWidth = BLOCK_WIDTH;
+export const TransvoxelExtractor = {
+  BlockWidth: BLOCK_WIDTH,
 
-  static polygonizeRegularCell(
+  polygonizeRegularCell(
     min: Vector3i,
     offset: Vector3f,
     xyz: Vector3i,
@@ -667,9 +667,9 @@ export class TransvoxelExtractor {
     }
 
     return triangleCount;
-  }
+  },
 
-  static polygonizeTransitionCell(
+  polygonizeTransitionCell(
     offset: Vector3f,
     origin: Vector3i,
     localX: Vector3i,
