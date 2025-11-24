@@ -1,12 +1,8 @@
 /// <reference types="@webgpu/types" />
 
-import type {
-  ChunkFieldRequest,
-  ChunkFieldResponse,
-  DensityGeneratorId,
-} from "./chunk-field-types";
+import type { ChunkFieldRequest, ChunkFieldResponse, DensityGeneratorId } from './chunk-field-types'
 
-const WORKGROUP_SIZE = 4;
+const WORKGROUP_SIZE = 4
 const CHUNK_SAMPLER_SHADER = /* wgsl */ `
   struct ChunkParams {
     minCoords : vec4<f32>,
@@ -88,87 +84,87 @@ const CHUNK_SAMPLER_SHADER = /* wgsl */ `
     let linearIndex = (global_id.z * sampleSize + global_id.y) * sampleSize + global_id.x;
     outValues[linearIndex] = i32(clamped);
   }
-`;
+`
 
-const alignTo = (value: number, multiple: number): number => Math.ceil(value / multiple) * multiple;
+const alignTo = (value: number, multiple: number): number => Math.ceil(value / multiple) * multiple
 
 export class WebGPUChunkGenerator {
-  private readonly blockWidth: number;
-  private device: GPUDevice | null = null;
-  private pipeline: GPUComputePipeline | null = null;
-  private bindGroupLayout: GPUBindGroupLayout | null = null;
-  private paramsBuffer: GPUBuffer | null = null;
-  private readyPromise: Promise<void> | null = null;
+  private readonly blockWidth: number
+  private device: GPUDevice | null = null
+  private pipeline: GPUComputePipeline | null = null
+  private bindGroupLayout: GPUBindGroupLayout | null = null
+  private paramsBuffer: GPUBuffer | null = null
+  private readyPromise: Promise<void> | null = null
 
   constructor(blockWidth: number) {
-    this.blockWidth = blockWidth;
+    this.blockWidth = blockWidth
   }
 
   static isSupported(): boolean {
-    return typeof navigator !== "undefined" && typeof navigator.gpu !== "undefined";
+    return typeof navigator !== 'undefined' && typeof navigator.gpu !== 'undefined'
   }
 
   supportsGenerator(generatorId: DensityGeneratorId): boolean {
-    return generatorId === "terrain";
+    return generatorId === 'terrain'
   }
 
   async generateChunkData(request: ChunkFieldRequest): Promise<ChunkFieldResponse> {
-    await this.ensureReady();
+    await this.ensureReady()
 
     if (!this.supportsGenerator(request.generatorId)) {
-      throw new Error(`Generator ${request.generatorId} is not supported by the WebGPU path.`);
+      throw new Error(`Generator ${request.generatorId} is not supported by the WebGPU path.`)
     }
 
-    const device = this.device!;
-    const pipeline = this.pipeline!;
-    const bindGroupLayout = this.bindGroupLayout!;
-    const paramsBuffer = this.paramsBuffer!;
+    const device = this.device!
+    const pipeline = this.pipeline!
+    const bindGroupLayout = this.bindGroupLayout!
+    const paramsBuffer = this.paramsBuffer!
 
-    const { minX, minY, minZ, sampleSize, totalSamples } = this.computeSampleRegion(request);
+    const { minX, minY, minZ, sampleSize, totalSamples } = this.computeSampleRegion(request)
 
-    const uniformData = new Float32Array([minX, minY, minZ, sampleSize]);
-    device.queue.writeBuffer(paramsBuffer, 0, uniformData.buffer);
+    const uniformData = new Float32Array([minX, minY, minZ, sampleSize])
+    device.queue.writeBuffer(paramsBuffer, 0, uniformData.buffer)
 
-    const outputBytes = alignTo(totalSamples * 4, 4);
+    const outputBytes = alignTo(totalSamples * 4, 4)
     const storageBuffer = device.createBuffer({
       size: outputBytes,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-    });
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    })
     const readbackBuffer = device.createBuffer({
       size: outputBytes,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    })
 
     const bindGroup = device.createBindGroup({
       layout: bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: paramsBuffer } },
-        { binding: 1, resource: { buffer: storageBuffer } },
-      ],
-    });
+        { binding: 1, resource: { buffer: storageBuffer } }
+      ]
+    })
 
-    const encoder = device.createCommandEncoder();
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bindGroup);
-    const groups = Math.ceil(sampleSize / WORKGROUP_SIZE);
-    pass.dispatchWorkgroups(groups, groups, groups);
-    pass.end();
+    const encoder = device.createCommandEncoder()
+    const pass = encoder.beginComputePass()
+    pass.setPipeline(pipeline)
+    pass.setBindGroup(0, bindGroup)
+    const groups = Math.ceil(sampleSize / WORKGROUP_SIZE)
+    pass.dispatchWorkgroups(groups, groups, groups)
+    pass.end()
 
-    encoder.copyBufferToBuffer(storageBuffer, 0, readbackBuffer, 0, outputBytes);
-    device.queue.submit([encoder.finish()]);
+    encoder.copyBufferToBuffer(storageBuffer, 0, readbackBuffer, 0, outputBytes)
+    device.queue.submit([encoder.finish()])
 
-    await readbackBuffer.mapAsync(GPUMapMode.READ);
-    const mapped = readbackBuffer.getMappedRange();
-    const copy = mapped.slice(0);
-    readbackBuffer.unmap();
-    storageBuffer.destroy();
-    readbackBuffer.destroy();
+    await readbackBuffer.mapAsync(GPUMapMode.READ)
+    const mapped = readbackBuffer.getMappedRange()
+    const copy = mapped.slice(0)
+    readbackBuffer.unmap()
+    storageBuffer.destroy()
+    readbackBuffer.destroy()
 
-    const int32View = new Int32Array(copy);
-    const int8Result = new Int8Array(totalSamples);
+    const int32View = new Int32Array(copy)
+    const int8Result = new Int8Array(totalSamples)
     for (let i = 0; i < totalSamples; i++) {
-      int8Result[i] = int32View[i];
+      int8Result[i] = int32View[i]
     }
 
     return {
@@ -180,55 +176,55 @@ export class WebGPUChunkGenerator {
       buffer: int8Result.buffer,
       requestId: request.requestId,
       generatorId: request.generatorId,
-      generatorToken: request.generatorToken,
-    };
+      generatorToken: request.generatorToken
+    }
   }
 
   private computeSampleRegion(request: ChunkFieldRequest) {
-    const range = this.blockWidth << request.lodIndex;
-    const transitionReach = request.lodIndex === 0 ? 1 : (1 << (request.lodIndex - 1)) * 2 + 1;
-    const padding = Math.max(1, transitionReach);
-    const sampleSize = range + padding * 2 + 1;
-    const minX = request.chunkX * range - padding;
-      const chunkOriginY = request.originY ?? request.chunkY * range;
-      const minY = chunkOriginY - padding;
-    const minZ = request.chunkZ * range - padding;
-    const totalSamples = sampleSize * sampleSize * sampleSize;
-    return { minX, minY, minZ, sampleSize, totalSamples };
+    const range = this.blockWidth << request.lodIndex
+    const transitionReach = request.lodIndex === 0 ? 1 : (1 << (request.lodIndex - 1)) * 2 + 1
+    const padding = Math.max(1, transitionReach)
+    const sampleSize = range + padding * 2 + 1
+    const minX = request.chunkX * range - padding
+    const chunkOriginY = request.originY ?? request.chunkY * range
+    const minY = chunkOriginY - padding
+    const minZ = request.chunkZ * range - padding
+    const totalSamples = sampleSize * sampleSize * sampleSize
+    return { minX, minY, minZ, sampleSize, totalSamples }
   }
 
   private ensureReady(): Promise<void> {
     if (this.readyPromise) {
-      return this.readyPromise;
+      return this.readyPromise
     }
 
     if (!WebGPUChunkGenerator.isSupported()) {
-      return Promise.reject(new Error("WebGPU is not available in this environment."));
+      return Promise.reject(new Error('WebGPU is not available in this environment.'))
     }
 
-    this.readyPromise = this.initialize();
-    return this.readyPromise;
+    this.readyPromise = this.initialize()
+    return this.readyPromise
   }
 
   private async initialize(): Promise<void> {
-    const adapter = await navigator.gpu!.requestAdapter();
+    const adapter = await navigator.gpu!.requestAdapter()
     if (!adapter) {
-      throw new Error("WebGPU adapter is unavailable.");
+      throw new Error('WebGPU adapter is unavailable.')
     }
 
-    this.device = await adapter.requestDevice();
-    const shaderModule = this.device.createShaderModule({ code: CHUNK_SAMPLER_SHADER });
+    this.device = await adapter.requestDevice()
+    const shaderModule = this.device.createShaderModule({ code: CHUNK_SAMPLER_SHADER })
     this.pipeline = this.device.createComputePipeline({
-      layout: "auto",
+      layout: 'auto',
       compute: {
         module: shaderModule,
-        entryPoint: "main",
-      },
-    });
-    this.bindGroupLayout = this.pipeline.getBindGroupLayout(0);
+        entryPoint: 'main'
+      }
+    })
+    this.bindGroupLayout = this.pipeline.getBindGroupLayout(0)
     this.paramsBuffer = this.device.createBuffer({
       size: 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    })
   }
 }
