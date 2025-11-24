@@ -3,7 +3,7 @@
 //
 // Do not edit by hand.
 
-import { Vector3i } from "../math/vector3i";
+import { type Vector3i, createVector3i } from "../math/vector3i";
 
 export class RegularCell {
   constructor(
@@ -25,14 +25,14 @@ export class RegularCell {
 }
 
 const cornerIndex = [
-  new Vector3i(0, 0, 0),
-  new Vector3i(1, 0, 0),
-  new Vector3i(0, 0, 1),
-  new Vector3i(1, 0, 1),
-  new Vector3i(0, 1, 0),
-  new Vector3i(1, 1, 0),
-  new Vector3i(0, 1, 1),
-  new Vector3i(1, 1, 1),
+  createVector3i(0, 0, 0),
+  createVector3i(1, 0, 0),
+  createVector3i(0, 0, 1),
+  createVector3i(1, 0, 1),
+  createVector3i(0, 1, 0),
+  createVector3i(1, 1, 0),
+  createVector3i(0, 1, 1),
+  createVector3i(1, 1, 1),
 ];
 
 const regularCellClass = [

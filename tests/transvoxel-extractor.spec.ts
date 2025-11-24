@@ -2,8 +2,19 @@ import { describe, expect, it } from "vitest";
 
 import { TransvoxelMesher, TransvoxelExtractor, TransitionFace } from "../src/surface-extractor/transvoxel-extractor";
 import type { DensityFunction } from "../src/volume/volume-data";
-import { Vector3i } from "../src/math/vector3i";
-import { Vector3f } from "../src/math/vector3f";
+import {
+  type Vector3i,
+  createVector3i,
+  vector3iZero,
+} from "../src/math/vector3i";
+import {
+  type Vector3f,
+  createVector3f,
+  crossVector3f,
+  lengthVector3f,
+  subtractVector3f,
+  vector3fZero,
+} from "../src/math/vector3f";
 import { RegularCache, TransitionCache } from "../src/surface-extractor/cache";
 import { TransvoxelVertex, getRenderablePosition, unusedVertexPosition } from "../src/surface-extractor/vertex";
 import { Tables } from "../src/lengyel/tables";
@@ -44,11 +55,8 @@ const computeMeshBounds = (vertices: TransvoxelVertex[]): SampleBounds => {
   return { min, max };
 };
 
-const triangleArea = (a: Vector3f, b: Vector3f, c: Vector3f): number => {
-  const ab = b.subtract(a);
-  const ac = c.subtract(a);
-  return ab.cross(ac).length() * 0.5;
-};
+const triangleArea = (a: Vector3f, b: Vector3f, c: Vector3f): number =>
+  lengthVector3f(crossVector3f(subtractVector3f(b, a), subtractVector3f(c, a))) * 0.5;
 
 const hasDegenerateTriangles = (mesh: MeshData, epsilon = 1e-5): boolean => {
   const { vertices, indices } = mesh;
@@ -144,10 +152,10 @@ describe("TransvoxelExtractor", () => {
     const indices: number[] = [];
 
     const triangles = TransvoxelExtractor.polygonizeRegularCell(
-      Vector3i.zero,
-      Vector3f.zero,
-      Vector3i.zero,
-      Vector3i.zero,
+      vector3iZero,
+      vector3fZero,
+      vector3iZero,
+      vector3iZero,
       volume,
       0,
       1,
@@ -164,7 +172,7 @@ describe("TransvoxelExtractor", () => {
   it("produces deterministic regular block meshes", () => {
     const volume = createSphereVolume();
     const mesher = new TransvoxelMesher();
-    const options = { origin: Vector3i.zero, lodIndex: 0 as const, cellSize: 1 };
+    const options = { origin: vector3iZero, lodIndex: 0 as const, cellSize: 1 };
 
     const meshA = mesher.extractRegularBlock(volume, options);
     const meshB = mesher.extractRegularBlock(volume, options);
@@ -189,9 +197,9 @@ describe("TransvoxelExtractor", () => {
       "positiveZ",
     ];
 
-    const regularOnly = mesher.extractRegularBlock(planeField, { origin: Vector3i.zero, lodIndex: 1, cellSize: 1 });
+    const regularOnly = mesher.extractRegularBlock(planeField, { origin: vector3iZero, lodIndex: 1, cellSize: 1 });
     const withTransitions = mesher.extractBlock(planeField, {
-      origin: Vector3i.zero,
+      origin: vector3iZero,
       lodIndex: 1,
       cellSize: 1,
       transitionFaces: faces,
@@ -201,7 +209,7 @@ describe("TransvoxelExtractor", () => {
     expect(withTransitions.vertices.length).toBeGreaterThan(regularOnly.vertices.length);
     expect(withTransitions.indices.length).toBeGreaterThan(regularOnly.indices.length);
 
-    const hasSecondary = withTransitions.vertices.some((vertex) => !vertex.secondary.equals(unusedVertexPosition));
+    const hasSecondary = withTransitions.vertices.some((vertex) => vertex.secondary !== unusedVertexPosition);
     expect(hasSecondary).toBe(true);
   });
 
@@ -224,7 +232,7 @@ describe("TransvoxelExtractor", () => {
     for (const face of faces) {
       volume.reset();
       mesher.extractTransitionFaces(volume.sampler, {
-        origin: Vector3i.zero,
+        origin: vector3iZero,
         lodIndex,
         cellSize: 1,
         faces: [face],
@@ -271,7 +279,7 @@ describe("TransvoxelExtractor", () => {
     ];
     for (const face of faces) {
       const mesh = mesher.extractTransitionFaces(volume, {
-        origin: Vector3i.zero,
+        origin: vector3iZero,
         lodIndex,
         cellSize: 1,
         faces: [face],
@@ -311,7 +319,7 @@ describe("TransvoxelExtractor", () => {
 
     for (const face of faces) {
       const mesh = mesher.extractTransitionFaces(volume, {
-        origin: Vector3i.zero,
+        origin: vector3iZero,
         lodIndex,
         cellSize: 1,
         faces: [face],
@@ -342,13 +350,13 @@ describe("TransvoxelExtractor", () => {
     const indices: number[] = [];
     const lodIndex = 0;
     const cellSize = 1;
-    const offset = Vector3f.zero;
+    const offset = vector3fZero;
 
     TransvoxelExtractor.polygonizeRegularCell(
-      Vector3i.zero,
+      vector3iZero,
       offset,
-      Vector3i.zero,
-      Vector3i.zero,
+      vector3iZero,
+      vector3iZero,
       volume,
       lodIndex,
       cellSize,
@@ -360,10 +368,10 @@ describe("TransvoxelExtractor", () => {
     const afterFirstCell = verts.length;
 
     TransvoxelExtractor.polygonizeRegularCell(
-      new Vector3i(0, 0, 1),
+      createVector3i(0, 0, 1),
       offset,
-      new Vector3i(0, 0, 1),
-      Vector3i.zero,
+      createVector3i(0, 0, 1),
+      vector3iZero,
       volume,
       lodIndex,
       cellSize,
@@ -384,7 +392,7 @@ describe("TransvoxelExtractor", () => {
     const mesher = new TransvoxelMesher();
 
     const mesh = mesher.extractRegularBlock(planeField, {
-      origin: Vector3i.zero,
+      origin: vector3iZero,
       lodIndex: 0,
       cellSize: 1,
     });
@@ -398,11 +406,11 @@ describe("TransvoxelExtractor", () => {
     const scale = 16;
     const signedDistance = (x: number, y: number, z: number): number => x + y + z - planeOffset;
     const planeField: DensityFunction = (x, y, z) => Math.floor(signedDistance(x, y, z) * scale);
-    const translation = new Vector3i(16, -8, -8);
+    const translation = createVector3i(16, -8, -8);
     const mesher = new TransvoxelMesher();
 
     const base = mesher.extractRegularBlock(planeField, {
-      origin: Vector3i.zero,
+      origin: vector3iZero,
       lodIndex: 0,
       cellSize: 1,
     });
@@ -436,12 +444,12 @@ describe("TransvoxelExtractor", () => {
     const sphereField = createSphereVolume(chunkSize, chunkSize);
 
     const base = mesher.extractRegularBlock(sphereField, {
-      origin: Vector3i.zero,
+      origin: vector3iZero,
       lodIndex,
       cellSize: 1,
     });
     const neighbor = mesher.extractRegularBlock(sphereField, {
-      origin: new Vector3i(chunkSize, 0, 0),
+      origin: createVector3i(chunkSize, 0, 0),
       lodIndex,
       cellSize: 1,
     });
@@ -460,13 +468,13 @@ describe("TransvoxelExtractor", () => {
     const mesher = new TransvoxelMesher();
 
     const unitMesh = mesher.extractRegularBlock(sphereField, {
-      origin: Vector3i.zero,
+      origin: vector3iZero,
       lodIndex: 0,
       cellSize: 1,
     });
 
     const scaledMesh = mesher.extractRegularBlock(sphereField, {
-      origin: Vector3i.zero,
+      origin: vector3iZero,
       lodIndex: 0,
       cellSize: 2,
     });
@@ -485,25 +493,25 @@ describe("TransvoxelExtractor", () => {
     const planeField: DensityFunction = (x, _y, _z) => Math.floor((x - 17) * 16);
     const mesher = new TransvoxelMesher();
     const mesh = mesher.extractRegularBlock(planeField, {
-      origin: new Vector3i(16, 0, 0),
+      origin: createVector3i(16, 0, 0),
       lodIndex: 0,
       cellSize: 1,
     });
 
     expect(mesh.vertices.length).toBeGreaterThan(0);
     const hasSecondary = mesh.vertices.some(
-      (vertex) => vertex.near !== 0 && !vertex.secondary.equals(unusedVertexPosition)
+      (vertex) => vertex.near !== 0 && vertex.secondary !== unusedVertexPosition
     );
     expect(hasSecondary).toBe(true);
   });
 
   it("falls back to secondary coordinates only when primary is unused", () => {
-    const primary = new Vector3f(4, 5, 6);
-    const secondary = new Vector3f(1, 2, 3);
+    const primary = createVector3f(4, 5, 6);
+    const secondary = createVector3f(1, 2, 3);
     const regularVertex: TransvoxelVertex = {
       primary,
       secondary,
-      normal: Vector3f.zero,
+      normal: vector3fZero,
       near: 1,
     };
 
@@ -512,7 +520,7 @@ describe("TransvoxelExtractor", () => {
     const transitionVertex: TransvoxelVertex = {
       primary: unusedVertexPosition,
       secondary,
-      normal: Vector3f.zero,
+      normal: vector3fZero,
       near: 1,
     };
 
@@ -521,7 +529,7 @@ describe("TransvoxelExtractor", () => {
     const fallback: TransvoxelVertex = {
       primary,
       secondary: unusedVertexPosition,
-      normal: Vector3f.zero,
+      normal: vector3fZero,
       near: 0,
     };
 

@@ -23,8 +23,13 @@ import {
   type TransitionFace,
 } from "../src/surface-extractor/transvoxel-extractor";
 import { Tables } from "../src/lengyel/tables";
-import { Vector3f } from "../src/math/vector3f";
-import { Vector3i } from "../src/math/vector3i";
+import { createVector3f } from "../src/math/vector3f";
+import {
+  type Vector3i,
+  addVector3i,
+  createVector3i,
+  multiplyVector3iScalar,
+} from "../src/math/vector3i";
 import { RegularCache } from "../src/surface-extractor/cache";
 import { MeshData } from "../src/surface-extractor/mesh-data";
 import {
@@ -47,7 +52,7 @@ if (!mount) {
 }
 
 const BLOCK_WIDTH = TransvoxelExtractor.BlockWidth;
-const blockOrigin = new Vector3i(0, 0, 0);
+const blockOrigin = createVector3i(0, 0, 0);
 const initialExtent = BLOCK_WIDTH * 2;
 
 const scene = new Scene();
@@ -252,7 +257,7 @@ function rebuildDemo(): void {
 
   for (let gx = 0; gx < settings.gridMultiplier; gx++) {
     for (let gz = 0; gz < settings.gridMultiplier; gz++) {
-      const origin = new Vector3i(
+      const origin = createVector3i(
         gx * currentChunkStride,
         0,
         gz * currentChunkStride
@@ -864,14 +869,14 @@ function evaluateRegularCellDiagnostics(
   const chunkZ = Math.floor(selection.z / BLOCK_WIDTH);
   const localX = selection.x % BLOCK_WIDTH;
   const localZ = selection.z % BLOCK_WIDTH;
-  const xyz = new Vector3i(localX, selection.y, localZ);
-  const chunkOrigin = new Vector3i(
+  const xyz = createVector3i(localX, selection.y, localZ);
+  const chunkOrigin = createVector3i(
     chunkX * context.chunkStride,
     0,
     chunkZ * context.chunkStride
   );
-  const min = chunkOrigin.add(xyz.multiplyScalar(context.lodScale));
-  const offset = new Vector3f(
+  const min = addVector3i(chunkOrigin, multiplyVector3iScalar(xyz, context.lodScale));
+  const offset = createVector3f(
     chunkOrigin.x * context.cellSize,
     chunkOrigin.y * context.cellSize,
     chunkOrigin.z * context.cellSize

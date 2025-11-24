@@ -6,7 +6,7 @@ import {
   type TransitionFace,
 } from "../src/surface-extractor/transvoxel-extractor";
 import type { DensityFunction } from "../src/volume/volume-data";
-import { Vector3i } from "../src/math/vector3i";
+import { type Vector3i, createVector3i, vector3iZero } from "../src/math/vector3i";
 import { getRenderablePosition, unusedVertexPosition } from "../src/surface-extractor/vertex";
 import type { MeshData } from "../src/surface-extractor/mesh-data";
 import type { Vector3f } from "../src/math/vector3f";
@@ -57,7 +57,7 @@ describe("transition seams", () => {
       const axis = axisForFace(face);
       const direction = directionForFace(face);
       const seamCoordinate = direction === -1 ? 0 : coarseExtent;
-      const coarseOrigin = Vector3i.zero;
+      const coarseOrigin = vector3iZero;
       const transitionMesh = mesher.extractTransitionFaces(sphereField, {
         origin: coarseOrigin,
         lodIndex: COARSE_LOD,
@@ -173,7 +173,7 @@ function buildHighOrigin(
   const [t0, t1] = tangentialAxes[axis];
   components[t0] = tangentialOffsets?.[t0] ?? 0;
   components[t1] = tangentialOffsets?.[t1] ?? 0;
-  return new Vector3i(components.x, components.y, components.z);
+  return createVector3i(components.x, components.y, components.z);
 }
 
 type Bounds = Record<AxisKey, { min: number; max: number }>;

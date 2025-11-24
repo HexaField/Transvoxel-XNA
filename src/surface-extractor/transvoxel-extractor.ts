@@ -1,7 +1,36 @@
 import { Tables, RegularCell } from "../lengyel/tables";
-import { Vector3f } from "../math/vector3f";
-import { Vector3i } from "../math/vector3i";
-import { Matrix3x3 } from "../math/matrix3x3";
+import {
+  type Vector3f,
+  addVector3f,
+  combineVector3f,
+  createVector3f,
+  divideVector3fScalar,
+  fromVector3i as vector3fFromVector3i,
+  multiplyVector3fScalar,
+  normalizeVector3f,
+  subtractVector3f,
+  setVector3f,
+} from "../math/vector3f";
+import {
+  type Vector3i,
+  addVector3i,
+  createVector3i,
+  multiplyVector3iScalar,
+  setVector3i,
+  subtractVector3i,
+  vector3iComponent,
+  vector3iUnitX,
+  vector3iUnitY,
+  vector3iUnitZ,
+} from "../math/vector3i";
+import {
+  createMatrix3x3,
+  matrix3x3FromColumns,
+  multiplyMatrix3x3Vector3f,
+  multiplyMatrix3x3Vector3i,
+  setMatrix3x3,
+  type Matrix3x3,
+} from "../math/matrix3x3";
 import { DensityFunction } from "../volume/volume-data";
 import { RegularCache, TransitionCache } from "./cache";
 import { MeshData } from "./mesh-data";
@@ -14,16 +43,21 @@ const hiNibble = (value: number): number => (value >> 4) & 0x0f;
 const loNibble = (value: number): number => value & 0x0f;
 const signBit = (value: number): number => (value < 0 ? 1 : 0);
 
-const toVector3f = (vector: Vector3i): Vector3f => new Vector3f(vector.x, vector.y, vector.z);
+const toVector3f = (vector: Vector3i): Vector3f => vector3fFromVector3i(vector);
+const vertexDeltaScratch = createVector3f();
+const vertexProjectionScratch = createVector3f();
+const transitionDeltaScratch = createVector3f();
+const transitionProjectionScratch = createVector3f();
+const transitionSecondaryBaseScratch = createVector3f();
 
 const setAxisComponent = (vector: Vector3f, axis: number, value: number): Vector3f => {
   switch (axis) {
     case 0:
-      return new Vector3f(value, vector.y, vector.z);
+      return createVector3f(value, vector.y, vector.z);
     case 1:
-      return new Vector3f(vector.x, value, vector.z);
+      return createVector3f(vector.x, value, vector.z);
     case 2:
-      return new Vector3f(vector.x, vector.y, value);
+      return createVector3f(vector.x, vector.y, value);
     default:
       throw new RangeError(`Axis ${axis} is out of range for Vector3f.`);
   }
@@ -38,9 +72,9 @@ const intDiv = (numerator: number, denominator: number): number => {
   return Math.trunc(numerator / denominator);
 };
 
-const computeDelta = (v: Vector3f, k: number, s: number): Vector3f => {
+const computeDelta = (v: Vector3f, k: number, s: number, out: Vector3f = createVector3f()): Vector3f => {
   if (k < 1) {
-    return Vector3f.zero;
+    return setVector3f(out, 0, 0, 0);
   }
 
   const p2k = Math.pow(2, k);
@@ -57,11 +91,13 @@ const computeDelta = (v: Vector3f, k: number, s: number): Vector3f => {
     return 0;
   };
 
-  return new Vector3f(componentDelta(v.x), componentDelta(v.y), componentDelta(v.z));
+  return setVector3f(out, componentDelta(v.x), componentDelta(v.y), componentDelta(v.z));
 };
 
-const projectNormal = (n: Vector3f, delta: Vector3f): Vector3f => {
-  const mat = new Matrix3x3(
+const projectionMatrix = createMatrix3x3();
+const projectNormal = (n: Vector3f, delta: Vector3f, out: Vector3f = createVector3f()): Vector3f => {
+  setMatrix3x3(
+    projectionMatrix,
     1.0 - n.x * n.x,
     -n.x * n.y,
     -n.x * n.z,
@@ -73,14 +109,14 @@ const projectNormal = (n: Vector3f, delta: Vector3f): Vector3f => {
     1.0 - n.z * n.z
   );
 
-  return mat.multiplyVector3f(delta);
+  return multiplyMatrix3x3Vector3f(projectionMatrix, delta, out);
 };
 
 const prevOffset = (dir: number): Vector3i =>
-  new Vector3i(-(dir & 1), -((dir >> 1) & 1), -((dir >> 2) & 1));
+  createVector3i(-(dir & 1), -((dir >> 1) & 1), -((dir >> 2) & 1));
 
 const computeNormal = (n0: Vector3f, n1: Vector3f, t0: number, t1: number): Vector3f =>
-  n0.multiplyScalar(t0).add(n1.multiplyScalar(t1)).normalize();
+  normalizeVector3f(combineVector3f(n0, t0, n1, t1));
 
 const createVertex = (
   pi: Vector3f,
@@ -90,13 +126,14 @@ const createVertex = (
   lodIndex: number,
   cellSize: number
 ): TransvoxelVertex => {
-  const primary = offset.add(pi.multiplyScalar(cellSize));
+  const scaledPi = multiplyVector3fScalar(pi, cellSize, vertexDeltaScratch);
+  const primary = createVector3f(offset.x + scaledPi.x, offset.y + scaledPi.y, offset.z + scaledPi.z);
   if (near > 0) {
-    const delta = computeDelta(pi, lodIndex, BLOCK_WIDTH);
-    const projected = projectNormal(normal, delta).multiplyScalar(cellSize);
+    const delta = computeDelta(pi, lodIndex, BLOCK_WIDTH, vertexDeltaScratch);
+    const projected = multiplyVector3fScalar(projectNormal(normal, delta, vertexProjectionScratch), cellSize, vertexProjectionScratch);
     return {
       primary,
-      secondary: primary.add(projected),
+      secondary: createVector3f(primary.x + projected.x, primary.y + projected.y, primary.z + projected.z),
       normal,
       near,
     };
@@ -146,8 +183,8 @@ const interpolate = (
   }
 
   for (let i = 0; i < lodIndex; i++) {
-    const vm = vStart.add(vEnd).divideScalar(2);
-    const pm = new Vector3i((pStart.x + pEnd.x) >> 1, (pStart.y + pEnd.y) >> 1, (pStart.z + pEnd.z) >> 1);
+    const vm = divideVector3fScalar(addVector3f(vStart, vEnd), 2);
+    const pm = createVector3i((pStart.x + pEnd.x) >> 1, (pStart.y + pEnd.y) >> 1, (pStart.z + pEnd.z) >> 1);
     const sm = sample(samples, pm);
 
     if (signBit(s0) !== signBit(sm)) {
@@ -164,34 +201,44 @@ const interpolate = (
   t = intDiv(s1 << 8, s1 - s0);
   u = 0x0100 - t;
 
-  return vStart.multiplyScalar(t * S).add(vEnd.multiplyScalar(u * S));
+  return combineVector3f(vStart, t * S, vEnd, u * S);
 };
 
 const buildCornerPositions = (min: Vector3i, lodScale: number): Vector3i[] =>
-  Tables.CornerIndex.map((corner) => min.add(corner.multiplyScalar(lodScale)));
+  Tables.CornerIndex.map((corner) => addVector3i(min, multiplyVector3iScalar(corner, lodScale)));
 
 const transitionCoordinates: ReadonlyArray<Vector3i> = [
-  new Vector3i(0, 0, 0),
-  new Vector3i(1, 0, 0),
-  new Vector3i(2, 0, 0),
-  new Vector3i(0, 1, 0),
-  new Vector3i(1, 1, 0),
-  new Vector3i(2, 1, 0),
-  new Vector3i(0, 2, 0),
-  new Vector3i(1, 2, 0),
-  new Vector3i(2, 2, 0),
-  new Vector3i(0, 0, 2),
-  new Vector3i(2, 0, 2),
-  new Vector3i(0, 2, 2),
-  new Vector3i(2, 2, 2),
+  createVector3i(0, 0, 0),
+  createVector3i(1, 0, 0),
+  createVector3i(2, 0, 0),
+  createVector3i(0, 1, 0),
+  createVector3i(1, 1, 0),
+  createVector3i(2, 1, 0),
+  createVector3i(0, 2, 0),
+  createVector3i(1, 2, 0),
+  createVector3i(2, 2, 0),
+  createVector3i(0, 0, 2),
+  createVector3i(2, 0, 2),
+  createVector3i(0, 2, 2),
+  createVector3i(2, 2, 2),
 ];
+const transitionPositionsScratch = transitionCoordinates.map(() => createVector3i());
+const transitionSampleIndexMap = [0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 2, 6, 8];
+const transitionScaledCoordinate = createVector3i();
+const transitionNormalsScratch = Array.from({ length: 13 }, () => createVector3f());
+const transitionBasisColumnXScratch = createVector3i();
+const transitionBasisColumnYScratch = createVector3i();
+const transitionBasisColumnZScratch = createVector3i();
+const transitionBasisColumnXFloat = createVector3f();
+const transitionBasisColumnYFloat = createVector3f();
+const transitionBasisColumnZFloat = createVector3f();
 
 const buildCornerNormals = (positions: Vector3i[], samples: DensityFunction): Vector3f[] =>
   positions.map((p) => {
-    const nx = (sample(samples, p.add(Vector3i.unitX)) - sample(samples, p.subtract(Vector3i.unitX))) * 0.5;
-    const ny = (sample(samples, p.add(Vector3i.unitY)) - sample(samples, p.subtract(Vector3i.unitY))) * 0.5;
-    const nz = (sample(samples, p.add(Vector3i.unitZ)) - sample(samples, p.subtract(Vector3i.unitZ))) * 0.5;
-    return new Vector3f(nx, ny, nz).normalize();
+    const nx = (sample(samples, addVector3i(p, vector3iUnitX)) - sample(samples, subtractVector3i(p, vector3iUnitX))) * 0.5;
+    const ny = (sample(samples, addVector3i(p, vector3iUnitY)) - sample(samples, subtractVector3i(p, vector3iUnitY))) * 0.5;
+    const nz = (sample(samples, addVector3i(p, vector3iUnitZ)) - sample(samples, subtractVector3i(p, vector3iUnitZ))) * 0.5;
+    return normalizeVector3f(createVector3f(nx, ny, nz));
   });
 
 const toVector3fArray = (vectors: Vector3i[]): Vector3f[] => vectors.map((v) => toVector3f(v));
@@ -220,11 +267,10 @@ interface TransitionFaceDescriptor {
   localZ: Vector3i;
 }
 
-const blockVector = (x: number, y: number, z: number): Vector3i =>
-  new Vector3i(x, y, z);
+const blockVector = (x: number, y: number, z: number): Vector3i => createVector3i(x, y, z);
 
 const crossVector3i = (a: Vector3i, b: Vector3i): Vector3i =>
-  new Vector3i(
+  createVector3i(
     a.y * b.z - a.z * b.y,
     a.z * b.x - a.x * b.z,
     a.x * b.y - a.y * b.x
@@ -283,11 +329,27 @@ const transitionFaceDescriptors: Record<TransitionFace, TransitionFaceDescriptor
   },
 };
 
-export class TransvoxelMesher {
-  private readonly regularCache = new RegularCache(BLOCK_WIDTH);
-  private readonly transitionCache = new TransitionCache(BLOCK_WIDTH);
+export interface TransvoxelMesherOptions {
+  regularCache?: RegularCache;
+  transitionCache?: TransitionCache;
+}
 
-  constructor() {}
+export class TransvoxelMesher {
+  private readonly regularCache: RegularCache;
+  private readonly transitionCache: TransitionCache;
+
+  constructor(options: TransvoxelMesherOptions = {}) {
+    this.regularCache = options.regularCache ?? new RegularCache(BLOCK_WIDTH);
+    this.transitionCache = options.transitionCache ?? new TransitionCache(BLOCK_WIDTH);
+  }
+
+  getRegularCache(): RegularCache {
+    return this.regularCache;
+  }
+
+  getTransitionCache(): TransitionCache {
+    return this.transitionCache;
+  }
 
   extractBlock(
     samples: DensityFunction,
@@ -317,15 +379,21 @@ export class TransvoxelMesher {
     const vertices: TransvoxelVertex[] = [];
     const indices: number[] = [];
     this.regularCache.reset();
+    const lodScale = 1 << lodIndex;
 
     const blockOffset =
-      offset ?? new Vector3f(origin.x * cellSize, origin.y * cellSize, origin.z * cellSize);
+      offset ?? createVector3f(origin.x * cellSize, origin.y * cellSize, origin.z * cellSize);
+
+    const xyz = createVector3i();
+    const scaled = createVector3i();
+    const min = createVector3i();
 
     for (let x = 0; x < BLOCK_WIDTH; x++) {
       for (let y = 0; y < BLOCK_WIDTH; y++) {
         for (let z = 0; z < BLOCK_WIDTH; z++) {
-          const xyz = new Vector3i(x, y, z);
-          const min = origin.add(xyz.multiplyScalar(1 << lodIndex));
+          setVector3i(xyz, x, y, z);
+          multiplyVector3iScalar(xyz, lodScale, scaled);
+          addVector3i(origin, scaled, min);
           TransvoxelExtractor.polygonizeRegularCell(
             min,
             blockOffset,
@@ -365,7 +433,7 @@ export class TransvoxelMesher {
     }
 
     const blockOffset =
-      offset ?? new Vector3f(origin.x * cellSize, origin.y * cellSize, origin.z * cellSize);
+      offset ?? createVector3f(origin.x * cellSize, origin.y * cellSize, origin.z * cellSize);
 
     const vertices: TransvoxelVertex[] = [];
     const indices: number[] = [];
@@ -405,15 +473,23 @@ export class TransvoxelMesher {
     const lodScale = 1 << lodIndex;
     const sampleStep = 1 << (lodIndex - 1);
     const stride = sampleStep << 1;
-
-    const faceOrigin = origin.add(descriptor.originOffset.multiplyScalar(lodScale));
+    const scaledOriginOffset = createVector3i();
+    const faceOrigin = createVector3i();
+    addVector3i(origin, multiplyVector3iScalar(descriptor.originOffset, lodScale, scaledOriginOffset), faceOrigin);
     const orientation = dotVector3i(crossVector3i(descriptor.localX, descriptor.localY), descriptor.localZ);
     const invertWinding = orientation > 0;
 
+    const rowOrigin = createVector3i();
+    const cellOrigin = createVector3i();
+    const stepX = createVector3i();
+    const stepY = createVector3i();
+
     for (let y = 0; y < BLOCK_WIDTH; y++) {
-      const rowOrigin = faceOrigin.add(descriptor.localY.multiplyScalar(y * stride));
+      multiplyVector3iScalar(descriptor.localY, y * stride, stepY);
+      addVector3i(faceOrigin, stepY, rowOrigin);
       for (let x = 0; x < BLOCK_WIDTH; x++) {
-        const cellOrigin = rowOrigin.add(descriptor.localX.multiplyScalar(x * stride));
+        multiplyVector3iScalar(descriptor.localX, x * stride, stepX);
+        addVector3i(rowOrigin, stepX, cellOrigin);
         const directionMask = (x > 0 ? 1 : 0) | ((y > 0 ? 1 : 0) << 1);
         TransvoxelExtractor.polygonizeTransitionCell(
           blockOffset,
@@ -456,17 +532,17 @@ export class TransvoxelExtractor {
   ): number {
     const lodScale = 1 << lodIndex;
     const last = 15 * lodScale;
-    const blockOriginF = Vector3f.fromVector3i(blockOrigin);
+    const blockOriginF = vector3fFromVector3i(blockOrigin);
     const directionMask =
       (xyz.x > 0 ? 1 : 0) | ((xyz.y > 0 ? 1 : 0) << 1) | ((xyz.z > 0 ? 1 : 0) << 2);
     let near = 0;
-    const localMin = min.subtract(blockOrigin);
+    const localMin = subtractVector3i(min, blockOrigin);
 
     for (let i = 0; i < 3; i++) {
-      if (localMin.component(i) === 0) {
+      if (vector3iComponent(localMin, i) === 0) {
         near |= 1 << (i * 2);
       }
-      if (localMin.component(i) === last) {
+      if (vector3iComponent(localMin, i) === last) {
         near |= 1 << (i * 2 + 1);
       }
     }
@@ -518,12 +594,9 @@ export class TransvoxelExtractor {
         const idx = loNibble((edgeCode >> 8) & 0xff);
         const axisBits = dir & 0x07;
         let present = axisBits !== 0 && (axisBits & directionMask) === axisBits;
-        let reusedFrom = -1;
-        let prevCoords: Vector3i | null = null;
 
         if (present) {
-          prevCoords = xyz.add(prevOffset(dir));
-          const prev = cache.getCellByVector(prevCoords);
+          const prev = cache.getCellByVector(addVector3i(xyz, prevOffset(dir)));
           if (
             prev.caseIndex === 0 ||
             prev.caseIndex === 255 ||
@@ -532,13 +605,12 @@ export class TransvoxelExtractor {
             localVertexMapping[i] = -1;
           } else {
             localVertexMapping[i] = prev.verts[idx];
-            reusedFrom = prev.verts[idx];
           }
         }
 
         if (!present || localVertexMapping[i] < 0) {
           const interpolated = interpolate(toVector3f(p0), toVector3f(p1), p0, p1, samples, lodIndex);
-          const pi = interpolated.subtract(blockOriginF);
+          const pi = subtractVector3f(interpolated, blockOriginF);
           const normal = computeNormal(n0, n1, t0, t1);
           const vertex = createVertex(pi, normal, near, offset, lodIndex, cellSize);
           localVertexMapping[i] = verts.push(vertex) - 1;
@@ -550,10 +622,7 @@ export class TransvoxelExtractor {
         }
 
       } else if (t === 0 && v1 === 7) {
-        const pi = toVector3f(p1)
-          .multiplyScalar(t0)
-          .add(toVector3f(p1).multiplyScalar(t1))
-          .subtract(blockOriginF);
+        const pi = subtractVector3f(combineVector3f(toVector3f(p1), t0, toVector3f(p1), t1), blockOriginF);
         const normal = computeNormal(n0, n1, t0, t1);
         const vertex = createVertex(pi, normal, near, offset, lodIndex, cellSize);
         localVertexMapping[i] = verts.push(vertex) - 1;
@@ -564,11 +633,9 @@ export class TransvoxelExtractor {
         const axisBits = dir & 0x07;
         let present = axisBits !== 0 && (axisBits & directionMask) === axisBits;
         let reusedFrom = -1;
-        let prevCoords: Vector3i | null = null;
 
         if (present) {
-          prevCoords = xyz.add(prevOffset(dir));
-          const prev = cache.getCellByVector(prevCoords);
+          const prev = cache.getCellByVector(addVector3i(xyz, prevOffset(dir)));
           if (
             prev.caseIndex === 0 ||
             prev.caseIndex === 255 ||
@@ -582,10 +649,10 @@ export class TransvoxelExtractor {
         }
 
         if (!present || localVertexMapping[i] < 0) {
-          const pi = toVector3f(p0)
-            .multiplyScalar(t0)
-            .add(toVector3f(p1).multiplyScalar(t1))
-            .subtract(blockOriginF);
+          const pi = subtractVector3f(
+            combineVector3f(toVector3f(p0), t0, toVector3f(p1), t1),
+            blockOriginF
+          );
           const normal = computeNormal(n0, n1, t0, t1);
           const vertex = createVertex(pi, normal, near, offset, lodIndex, cellSize);
           localVertexMapping[i] = verts.push(vertex) - 1;
@@ -628,59 +695,55 @@ export class TransvoxelExtractor {
     const lodScale = 1 << lodIndex;
     const sampleStep = 1 << (lodIndex - 1);
     const last = 16 * lodScale;
-    const blockOriginF = Vector3f.fromVector3i(blockOrigin);
-    const localOrigin = origin.subtract(blockOrigin);
+    const blockOriginF = vector3fFromVector3i(blockOrigin);
+    const localOrigin = subtractVector3i(origin, blockOrigin);
     let near = 0;
 
     for (let i = 0; i < 3; i++) {
-      if (localOrigin.component(i) === 0) {
+      if (vector3iComponent(localOrigin, i) === 0) {
         near |= 1 << (i * 2);
       }
-      if (localOrigin.component(i) === last) {
+      if (vector3iComponent(localOrigin, i) === last) {
         near |= 1 << (i * 2 + 1);
       }
     }
 
-    const mx = localX.multiplyScalar(sampleStep);
-    const my = localY.multiplyScalar(sampleStep);
-    const mz = localZ.multiplyScalar(sampleStep);
-    const basis = Matrix3x3.fromColumns(
-      Vector3f.fromVector3i(mx),
-      Vector3f.fromVector3i(my),
-      Vector3f.fromVector3i(mz)
+    const mx = multiplyVector3iScalar(localX, sampleStep, transitionBasisColumnXScratch);
+    const my = multiplyVector3iScalar(localY, sampleStep, transitionBasisColumnYScratch);
+    const mz = multiplyVector3iScalar(localZ, sampleStep, transitionBasisColumnZScratch);
+    const basis = matrix3x3FromColumns(
+      setVector3f(transitionBasisColumnXFloat, mx.x, mx.y, mx.z),
+      setVector3f(transitionBasisColumnYFloat, my.x, my.y, my.z),
+      setVector3f(transitionBasisColumnZFloat, mz.x, mz.y, mz.z)
     );
 
-    const positions = transitionCoordinates.map((coord) => origin.add(basis.multiplyVector3i(coord)));
-
-    const normals = new Array<Vector3f>(13);
+    const positions = transitionPositionsScratch;
+    for (let i = 0; i < transitionCoordinates.length; i++) {
+      const transformed = multiplyMatrix3x3Vector3i(basis, transitionCoordinates[i], transitionScaledCoordinate);
+      setVector3i(
+        positions[i],
+        origin.x + transformed.x,
+        origin.y + transformed.y,
+        origin.z + transformed.z
+      );
+    }
+    const normals = transitionNormalsScratch;
     for (let i = 0; i < 9; i++) {
       const p = positions[i];
-      const nx = (sample(samples, p.add(Vector3i.unitX)) - sample(samples, p.subtract(Vector3i.unitX))) * 0.5;
-      const ny = (sample(samples, p.add(Vector3i.unitY)) - sample(samples, p.subtract(Vector3i.unitY))) * 0.5;
-      const nz = (sample(samples, p.add(Vector3i.unitZ)) - sample(samples, p.subtract(Vector3i.unitZ))) * 0.5;
-      normals[i] = new Vector3f(nx, ny, nz).normalize();
+      const nx =
+        (sample(samples, addVector3i(p, vector3iUnitX)) - sample(samples, subtractVector3i(p, vector3iUnitX))) * 0.5;
+      const ny =
+        (sample(samples, addVector3i(p, vector3iUnitY)) - sample(samples, subtractVector3i(p, vector3iUnitY))) * 0.5;
+      const nz =
+        (sample(samples, addVector3i(p, vector3iUnitZ)) - sample(samples, subtractVector3i(p, vector3iUnitZ))) * 0.5;
+      setVector3f(normals[i], nx, ny, nz);
+      normalizeVector3f(normals[i], normals[i]);
     }
 
     normals[0x9] = normals[0];
     normals[0xA] = normals[2];
     normals[0xB] = normals[6];
     normals[0xC] = normals[8];
-
-    const samplePositions = [
-      positions[0],
-      positions[1],
-      positions[2],
-      positions[3],
-      positions[4],
-      positions[5],
-      positions[6],
-      positions[7],
-      positions[8],
-      positions[0],
-      positions[2],
-      positions[6],
-      positions[8],
-    ];
 
     const caseCode =
       (signBit(sample(samples, positions[0])) * 0x001) |
@@ -708,13 +771,14 @@ export class TransvoxelExtractor {
     const vertexCount = cellData.getVertexCount();
     const triangleCount = cellData.getTriangleCount();
 
+    const sampleIndexMap = transitionSampleIndexMap;
     for (let i = 0; i < vertexCount; i++) {
       const edgeCode = Tables.TransitionVertexData[caseCode][i];
       const v0 = hiNibble(edgeCode & 0xff);
       const v1 = loNibble(edgeCode & 0xff);
       const lowside = v0 > 8 && v1 > 8;
-      const d0 = sample(samples, samplePositions[v0]);
-      const d1 = sample(samples, samplePositions[v1]);
+      const d0 = sample(samples, positions[sampleIndexMap[v0]]);
+      const d1 = sample(samples, positions[sampleIndexMap[v1]]);
       let t = intDiv(d1 << 8, d1 - d0);
       let u = 0x0100 - t;
       const t0 = t * S;
@@ -741,22 +805,30 @@ export class TransvoxelExtractor {
           const pi = interpolate(
             toVector3f(positions[v0]),
             toVector3f(positions[v1]),
-            samplePositions[v0],
-            samplePositions[v1],
+            positions[sampleIndexMap[v0]],
+            positions[sampleIndexMap[v1]],
             samples,
             lowside ? lodIndex : lodIndex - 1
           );
-          const piLocal = pi.subtract(blockOriginF);
+          const piLocal = subtractVector3f(pi, blockOriginF);
 
           let vertex: TransvoxelVertex;
           if (lowside) {
-            const axisBoundary = origin.component(axis) - blockOrigin.component(axis);
+            const axisBoundary = vector3iComponent(origin, axis) - vector3iComponent(blockOrigin, axis);
             const adjusted = setAxisComponent(piLocal, axis, axisBoundary);
-            const delta = computeDelta(adjusted, lodIndex, BLOCK_WIDTH);
-            const projected = projectNormal(normal, delta).multiplyScalar(cellSize);
+            const delta = computeDelta(adjusted, lodIndex, BLOCK_WIDTH, transitionDeltaScratch);
+            const projected = multiplyVector3fScalar(
+              projectNormal(normal, delta, transitionProjectionScratch),
+              cellSize,
+              transitionProjectionScratch
+            );
+            const secondaryBase = multiplyVector3fScalar(adjusted, cellSize, transitionSecondaryBaseScratch);
+            const baseX = offset.x + secondaryBase.x;
+            const baseY = offset.y + secondaryBase.y;
+            const baseZ = offset.z + secondaryBase.z;
             vertex = {
               primary: unusedVertexPosition,
-              secondary: offset.add(adjusted.multiplyScalar(cellSize)).add(projected),
+              secondary: createVector3f(baseX + projected.x, baseY + projected.y, baseZ + projected.z),
               normal,
               near,
             };
@@ -787,17 +859,25 @@ export class TransvoxelExtractor {
         }
 
         if (!present || localVertexMapping[i] < 0) {
-          let pi = toVector3f(positions[v]).subtract(blockOriginF);
+          let pi = subtractVector3f(toVector3f(positions[v]), blockOriginF);
           let vertex: TransvoxelVertex;
 
           if (v > 8) {
-            const axisBoundary = origin.component(axis) - blockOrigin.component(axis);
+            const axisBoundary = vector3iComponent(origin, axis) - vector3iComponent(blockOrigin, axis);
             const adjusted = setAxisComponent(pi, axis, axisBoundary);
-            const delta = computeDelta(adjusted, lodIndex, BLOCK_WIDTH);
-            const projected = projectNormal(normal, delta).multiplyScalar(cellSize);
+            const delta = computeDelta(adjusted, lodIndex, BLOCK_WIDTH, transitionDeltaScratch);
+            const projected = multiplyVector3fScalar(
+              projectNormal(normal, delta, transitionProjectionScratch),
+              cellSize,
+              transitionProjectionScratch
+            );
+            const secondaryBase = multiplyVector3fScalar(adjusted, cellSize, transitionSecondaryBaseScratch);
+            const baseX = offset.x + secondaryBase.x;
+            const baseY = offset.y + secondaryBase.y;
+            const baseZ = offset.z + secondaryBase.z;
             vertex = {
               primary: unusedVertexPosition,
-              secondary: offset.add(adjusted.multiplyScalar(cellSize)).add(projected),
+              secondary: createVector3f(baseX + projected.x, baseY + projected.y, baseZ + projected.z),
               normal,
               near,
             };

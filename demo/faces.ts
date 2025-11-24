@@ -17,9 +17,15 @@ import {
 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { Tables } from "../src/lengyel/tables";
-import { Matrix3x3 } from "../src/math/matrix3x3";
-import { Vector3f } from "../src/math/vector3f";
-import { Vector3i } from "../src/math/vector3i";
+import { matrix3x3FromColumns, multiplyMatrix3x3Vector3i } from "../src/math/matrix3x3";
+import { vector3fZero, fromVector3i as vector3fFromVector3i } from "../src/math/vector3f";
+import {
+  type Vector3i,
+  addVector3i,
+  createVector3i,
+  multiplyVector3iScalar,
+  vector3iZero,
+} from "../src/math/vector3i";
 import { RegularCache, TransitionCache } from "../src/surface-extractor/cache";
 import { MeshData } from "../src/surface-extractor/mesh-data";
 import { TransvoxelExtractor } from "../src/surface-extractor/transvoxel-extractor";
@@ -92,31 +98,31 @@ const debugControlsRegistry = new WeakMap<HTMLElement, CaseDebugControls>();
 const transitionDescriptor = {
   axis: 2 as 0 | 1 | 2,
   direction: 1 as -1 | 1,
-  originOffset: new Vector3i(0, 0, BLOCK_WIDTH),
-  localX: new Vector3i(1, 0, 0),
-  localY: new Vector3i(0, 1, 0),
-  localZ: new Vector3i(0, 0, -1),
+  originOffset: createVector3i(0, 0, BLOCK_WIDTH),
+  localX: createVector3i(1, 0, 0),
+  localY: createVector3i(0, 1, 0),
+  localZ: createVector3i(0, 0, -1),
 };
 
 const transitionCoordinates = [
-  new Vector3i(0, 0, 0),
-  new Vector3i(1, 0, 0),
-  new Vector3i(2, 0, 0),
-  new Vector3i(0, 1, 0),
-  new Vector3i(1, 1, 0),
-  new Vector3i(2, 1, 0),
-  new Vector3i(0, 2, 0),
-  new Vector3i(1, 2, 0),
-  new Vector3i(2, 2, 0),
-  new Vector3i(0, 0, 2),
-  new Vector3i(2, 0, 2),
-  new Vector3i(0, 2, 2),
-  new Vector3i(2, 2, 2),
+  createVector3i(0, 0, 0),
+  createVector3i(1, 0, 0),
+  createVector3i(2, 0, 0),
+  createVector3i(0, 1, 0),
+  createVector3i(1, 1, 0),
+  createVector3i(2, 1, 0),
+  createVector3i(0, 2, 0),
+  createVector3i(1, 2, 0),
+  createVector3i(2, 2, 0),
+  createVector3i(0, 0, 2),
+  createVector3i(2, 0, 2),
+  createVector3i(0, 2, 2),
+  createVector3i(2, 2, 2),
 ];
 
 const canonicalTransitionPositions = buildTransitionPositions(
   transitionDescriptor,
-  Vector3i.zero,
+  vector3iZero,
   TRANSITION_LOD_INDEX,
   TRANSITION_CELL_SIZE
 );
@@ -149,7 +155,7 @@ transitionBitOrder.forEach((positionIndex, bitIndex) => {
 
 const createRegularCaseSampler = (caseCode: number): DensityFunction =>
   (x, y, z) => {
-    const clamped = new Vector3i(clamp(x, 0, 1), clamp(y, 0, 1), clamp(z, 0, 1));
+    const clamped = createVector3i(clamp(x, 0, 1), clamp(y, 0, 1), clamp(z, 0, 1));
     const cornerIndex = regularCornerLookup.get(vectorKey(clamped));
     if (cornerIndex === undefined) {
       return 1;
@@ -402,10 +408,10 @@ function buildRegularCaseMesh(caseCode: number): MeshData {
   const vertices: TransvoxelVertex[] = [];
   const indices: number[] = [];
   TransvoxelExtractor.polygonizeRegularCell(
-    Vector3i.zero,
-    Vector3f.zero,
-    Vector3i.zero,
-    Vector3i.zero,
+    vector3iZero,
+    vector3fZero,
+    vector3iZero,
+    vector3iZero,
     createRegularCaseSampler(caseCode),
     0,
     1,
@@ -421,8 +427,8 @@ function buildTransitionCaseMesh(caseCode: number): MeshData {
   const vertices: TransvoxelVertex[] = [];
   const indices: number[] = [];
   TransvoxelExtractor.polygonizeTransitionCell(
-    Vector3f.zero,
-    Vector3i.zero,
+    vector3fZero,
+    vector3iZero,
     transitionDescriptor.localX,
     transitionDescriptor.localY,
     transitionDescriptor.localZ,
@@ -436,7 +442,7 @@ function buildTransitionCaseMesh(caseCode: number): MeshData {
     vertices,
     indices,
     transitionCache,
-    Vector3i.zero
+    vector3iZero
   );
   return new MeshData(vertices, indices);
 }
@@ -750,20 +756,17 @@ function buildTransitionPositions(
 ): Vector3i[] {
   const lodScale = 1 << lodIndex;
   const sampleStep = 1 << (lodIndex - 1);
-  const stride = sampleStep << 1;
-  const faceOrigin = origin.add(descriptor.originOffset.multiplyScalar(lodScale));
+  const faceOrigin = addVector3i(origin, multiplyVector3iScalar(descriptor.originOffset, lodScale));
   const cellOrigin = faceOrigin;
-  const mx = descriptor.localX.multiplyScalar(sampleStep * cellSize);
-  const my = descriptor.localY.multiplyScalar(sampleStep * cellSize);
-  const mz = descriptor.localZ.multiplyScalar(sampleStep * cellSize);
-  const basis = Matrix3x3.fromColumns(
-    Vector3f.fromVector3i(mx),
-    Vector3f.fromVector3i(my),
-    Vector3f.fromVector3i(mz)
+  const mx = multiplyVector3iScalar(descriptor.localX, sampleStep * cellSize);
+  const my = multiplyVector3iScalar(descriptor.localY, sampleStep * cellSize);
+  const mz = multiplyVector3iScalar(descriptor.localZ, sampleStep * cellSize);
+  const basis = matrix3x3FromColumns(
+    vector3fFromVector3i(mx),
+    vector3fFromVector3i(my),
+    vector3fFromVector3i(mz)
   );
-  return transitionCoordinates.map((coord) =>
-    cellOrigin.add(basis.multiplyVector3i(coord))
-  );
+  return transitionCoordinates.map((coord) => addVector3i(cellOrigin, multiplyMatrix3x3Vector3i(basis, coord)));
 }
 
 function caseKey(kind: CaseKind, code: number): string {

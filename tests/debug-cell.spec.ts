@@ -2,8 +2,15 @@ import { describe, it } from "vitest";
 import { TransvoxelExtractor } from "../src/surface-extractor/transvoxel-extractor";
 import { RegularCache } from "../src/surface-extractor/cache";
 import type { DensityFunction } from "../src/volume/volume-data";
-import { Vector3i } from "../src/math/vector3i";
-import { Vector3f } from "../src/math/vector3f";
+import {
+  type Vector3i,
+  addVector3i,
+  createVector3i,
+  equalsVector3i,
+  multiplyVector3iScalar,
+  vector3iZero,
+} from "../src/math/vector3i";
+import { type Vector3f, vector3fZero } from "../src/math/vector3f";
 import { getRenderablePosition, TransvoxelVertex } from "../src/surface-extractor/vertex";
 
 const BLOCK_WIDTH = TransvoxelExtractor.BlockWidth;
@@ -24,9 +31,9 @@ const createSampleVolume = (): DensityFunction => (x, y, z) => {
   return Math.floor(density * 127);
 };
 
-const blockOrigin = Vector3i.zero;
-const blockOffset = new Vector3f(0, 0, 0);
-const target = new Vector3i(8, 14, 9);
+const blockOrigin = vector3iZero;
+const blockOffset = vector3fZero;
+const target = createVector3i(8, 14, 9);
 
 const trianglesFrom = (verts: TransvoxelVertex[], indices: number[]) => {
   const tris: Array<{ a: Vector3f; b: Vector3f; c: Vector3f }> = [];
@@ -53,8 +60,8 @@ describe("debug cell", () => {
     outer: for (let x = 0; x < BLOCK_WIDTH; x++) {
       for (let y = 0; y < BLOCK_WIDTH; y++) {
         for (let z = 0; z < BLOCK_WIDTH; z++) {
-          const xyz = new Vector3i(x, y, z);
-          const min = blockOrigin.add(xyz.multiplyScalar(lodScale));
+          const xyz = createVector3i(x, y, z);
+          const min = addVector3i(blockOrigin, multiplyVector3iScalar(xyz, lodScale));
           const beforeVerts = cachedVerts.length;
           const beforeIndices = cachedIndices.length;
           TransvoxelExtractor.polygonizeRegularCell(
@@ -69,7 +76,7 @@ describe("debug cell", () => {
             cachedIndices,
             cachedCache
           );
-          if (xyz.equals(target)) {
+          if (equalsVector3i(xyz, target)) {
             cachedSlice = {
               verts: cachedVerts.slice(),
               indices: cachedIndices.slice(beforeIndices),
@@ -88,7 +95,7 @@ describe("debug cell", () => {
     const isolatedCache = new RegularCache(BLOCK_WIDTH);
     const isolatedVerts: TransvoxelVertex[] = [];
     const isolatedIndices: number[] = [];
-    const min = blockOrigin.add(target.multiplyScalar(lodScale));
+    const min = addVector3i(blockOrigin, multiplyVector3iScalar(target, lodScale));
     TransvoxelExtractor.polygonizeRegularCell(
       min,
       blockOffset,
