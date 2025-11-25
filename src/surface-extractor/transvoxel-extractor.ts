@@ -32,7 +32,7 @@ import {
 } from '../math/vector3i'
 import { DensityFunction } from '../volume/volume-data'
 import { RegularCache, TransitionCache } from './cache'
-import { MeshData } from './mesh-data'
+import { MeshData, buildMeshData } from './mesh-data'
 import { TransvoxelVertex, unusedVertexPosition } from './vertex'
 
 const BLOCK_WIDTH = 16
@@ -235,6 +235,13 @@ const transitionBasisColumnXFloat = createVector3f()
 const transitionBasisColumnYFloat = createVector3f()
 const transitionBasisColumnZFloat = createVector3f()
 
+interface RawMesh {
+  vertices: TransvoxelVertex[]
+  indices: number[]
+}
+
+const createRawMesh = (): RawMesh => ({ vertices: [], indices: [] })
+
 const buildCornerNormals = (positions: Vector3i[], samples: DensityFunction): Vector3f[] =>
   positions.map((p) => {
     const nx =
@@ -350,29 +357,44 @@ export class TransvoxelMesher {
     samples: DensityFunction,
     options: ExtractBlockOptions & { transitionFaces?: TransitionFace[] }
   ): MeshData {
-    const regularMesh = this.extractRegularBlock(samples, options)
+    const regularMesh = this.buildRegularBlockRaw(samples, options)
     const faces = options.transitionFaces?.filter(Boolean) ?? []
     if (faces.length === 0) {
-      return regularMesh
+      return buildMeshData(regularMesh.vertices, regularMesh.indices)
     }
 
-    const transitionMesh = this.extractTransitionFaces(samples, { ...options, faces })
-    if (transitionMesh.vertices.length === 0) {
-      return regularMesh
+    const transitionMesh = this.buildTransitionFacesRaw(samples, { ...options, faces })
+    if (transitionMesh.indices.length === 0) {
+      return buildMeshData(regularMesh.vertices, regularMesh.indices)
     }
 
     const vertexOffset = regularMesh.vertices.length
     transitionMesh.vertices.forEach((vertex) => regularMesh.vertices.push(vertex))
     transitionMesh.indices.forEach((index) => regularMesh.indices.push(index + vertexOffset))
-    return regularMesh
+    return buildMeshData(regularMesh.vertices, regularMesh.indices)
   }
 
   extractRegularBlock(
     samples: DensityFunction,
     { origin, offset, lodIndex = 0, cellSize = 1 }: ExtractBlockOptions
   ): MeshData {
-    const vertices: TransvoxelVertex[] = []
-    const indices: number[] = []
+    const raw = this.buildRegularBlockRaw(samples, { origin, offset, lodIndex, cellSize })
+    return buildMeshData(raw.vertices, raw.indices)
+  }
+
+  extractTransitionFaces(
+    samples: DensityFunction,
+    { origin, offset, lodIndex = 0, cellSize = 1, faces }: ExtractBlockOptions & { faces: TransitionFace[] }
+  ): MeshData {
+    const raw = this.buildTransitionFacesRaw(samples, { origin, offset, lodIndex, cellSize, faces })
+    return buildMeshData(raw.vertices, raw.indices)
+  }
+
+  private buildRegularBlockRaw(
+    samples: DensityFunction,
+    { origin, offset, lodIndex = 0, cellSize = 1 }: ExtractBlockOptions
+  ): RawMesh {
+    const raw = createRawMesh()
     this.regularCache.reset()
     const lodScale = 1 << lodIndex
 
@@ -396,34 +418,32 @@ export class TransvoxelMesher {
             samples,
             lodIndex,
             cellSize,
-            vertices,
-            indices,
+            raw.vertices,
+            raw.indices,
             this.regularCache
           )
         }
       }
     }
 
-    return new MeshData(vertices, indices)
+    return raw
   }
 
-  extractTransitionFaces(
+  private buildTransitionFacesRaw(
     samples: DensityFunction,
     { origin, offset, lodIndex = 0, cellSize = 1, faces }: ExtractBlockOptions & { faces: TransitionFace[] }
-  ): MeshData {
+  ): RawMesh {
     if (lodIndex < 1) {
       throw new RangeError('Transition faces require lodIndex >= 1.')
     }
 
+    const raw = createRawMesh()
     const uniqueFaces = Array.from(new Set(faces))
     if (uniqueFaces.length === 0) {
-      return new MeshData()
+      return raw
     }
 
     const blockOffset = offset ?? createVector3f(origin.x * cellSize, origin.y * cellSize, origin.z * cellSize)
-
-    const vertices: TransvoxelVertex[] = []
-    const indices: number[] = []
 
     for (const face of uniqueFaces) {
       const descriptor = transitionFaceDescriptors[face]
@@ -432,10 +452,19 @@ export class TransvoxelMesher {
       }
 
       this.transitionCache.reset()
-      this.generateTransitionFace(descriptor, origin, blockOffset, lodIndex, cellSize, samples, vertices, indices)
+      this.generateTransitionFace(
+        descriptor,
+        origin,
+        blockOffset,
+        lodIndex,
+        cellSize,
+        samples,
+        raw.vertices,
+        raw.indices
+      )
     }
 
-    return new MeshData(vertices, indices)
+    return raw
   }
 
   private generateTransitionFace(

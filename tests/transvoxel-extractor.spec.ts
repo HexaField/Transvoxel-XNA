@@ -38,12 +38,27 @@ interface SampleBounds {
   max: AxisBounds;
 }
 
-const computeMeshBounds = (vertices: TransvoxelVertex[]): SampleBounds => {
+const vertexCount = (mesh: MeshData): number => mesh.positions.length / 3;
+
+const getPositionFromMesh = (mesh: MeshData, index: number): Vector3f => {
+  const base = index * 3;
+  return {
+    x: mesh.positions[base],
+    y: mesh.positions[base + 1],
+    z: mesh.positions[base + 2],
+  } as Vector3f;
+};
+
+const computeMeshBounds = (mesh: MeshData): SampleBounds => {
   const min = { x: Infinity, y: Infinity, z: Infinity };
   const max = { x: -Infinity, y: -Infinity, z: -Infinity };
 
-  for (const vertex of vertices) {
-    const position = getRenderablePosition(vertex);
+  for (let i = 0; i < mesh.positions.length; i += 3) {
+    const position = {
+      x: mesh.positions[i],
+      y: mesh.positions[i + 1],
+      z: mesh.positions[i + 2],
+    };
     min.x = Math.min(min.x, position.x);
     min.y = Math.min(min.y, position.y);
     min.z = Math.min(min.z, position.z);
@@ -59,11 +74,11 @@ const triangleArea = (a: Vector3f, b: Vector3f, c: Vector3f): number =>
   lengthVector3f(crossVector3f(subtractVector3f(b, a), subtractVector3f(c, a))) * 0.5;
 
 const hasDegenerateTriangles = (mesh: MeshData, epsilon = 1e-5): boolean => {
-  const { vertices, indices } = mesh;
+  const { indices } = mesh;
   for (let i = 0; i < indices.length; i += 3) {
-    const a = getRenderablePosition(vertices[indices[i]]);
-    const b = getRenderablePosition(vertices[indices[i + 1]]);
-    const c = getRenderablePosition(vertices[indices[i + 2]]);
+    const a = getPositionFromMesh(mesh, indices[i]);
+    const b = getPositionFromMesh(mesh, indices[i + 1]);
+    const c = getPositionFromMesh(mesh, indices[i + 2]);
     if (triangleArea(a, b, c) <= epsilon) {
       return true;
     }
@@ -76,8 +91,12 @@ const expectVerticesNearSurface = (
   sdf: (position: Vector3f) => number,
   tolerance: number
 ): void => {
-  for (const vertex of mesh.vertices) {
-    const position = getRenderablePosition(vertex);
+  for (let i = 0; i < mesh.positions.length; i += 3) {
+    const position = {
+      x: mesh.positions[i],
+      y: mesh.positions[i + 1],
+      z: mesh.positions[i + 2],
+    };
     expect(Math.abs(sdf(position))).toBeLessThanOrEqual(tolerance);
   }
 };
@@ -177,9 +196,9 @@ describe("TransvoxelExtractor", () => {
     const meshA = mesher.extractRegularBlock(volume, options);
     const meshB = mesher.extractRegularBlock(volume, options);
 
-    expect(meshA.vertices.length).toBeGreaterThan(0);
+    expect(vertexCount(meshA)).toBeGreaterThan(0);
     expect(meshA.indices.length % 3).toBe(0);
-    expect(meshA.vertices.length).toBe(meshB.vertices.length);
+    expect(vertexCount(meshA)).toBe(vertexCount(meshB));
     expect(meshA.indices.length).toBe(meshB.indices.length);
   });
 
@@ -205,12 +224,9 @@ describe("TransvoxelExtractor", () => {
       transitionFaces: faces,
     });
 
-    expect(regularOnly.vertices.length).toBeGreaterThan(0);
-    expect(withTransitions.vertices.length).toBeGreaterThan(regularOnly.vertices.length);
+    expect(vertexCount(regularOnly)).toBeGreaterThan(0);
+    expect(vertexCount(withTransitions)).toBeGreaterThan(vertexCount(regularOnly));
     expect(withTransitions.indices.length).toBeGreaterThan(regularOnly.indices.length);
-
-    const hasSecondary = withTransitions.vertices.some((vertex) => vertex.secondary !== unusedVertexPosition);
-    expect(hasSecondary).toBe(true);
   });
 
   it("samples transition faces within the block bounds", () => {
@@ -286,8 +302,8 @@ describe("TransvoxelExtractor", () => {
       });
 
       const axisKey = axisKeyForFace(face);
-      expect(mesh.vertices.length).toBeGreaterThan(0);
-      const bounds = computeMeshBounds(mesh.vertices);
+      expect(vertexCount(mesh)).toBeGreaterThan(0);
+      const bounds = computeMeshBounds(mesh);
       const direction = directionForFace(face);
       const axisBoundary = direction === -1 ? 0 : extent;
 
@@ -325,14 +341,14 @@ describe("TransvoxelExtractor", () => {
         faces: [face],
       });
 
-      expect(mesh.vertices.length).toBeGreaterThan(0);
+      expect(vertexCount(mesh)).toBeGreaterThan(0);
       const axisKey = axisKeyForFace(face);
       const boundary = directionForFace(face) === -1 ? 0 : extent;
       const interiorDirection = interiorDirectionForFace(face);
       let maxInteriorDistance = -Infinity;
 
-      for (const vertex of mesh.vertices) {
-        const position = getRenderablePosition(vertex);
+      for (let i = 0; i < vertexCount(mesh); i++) {
+        const position = getPositionFromMesh(mesh, i);
         const axisValue = componentForAxis(position, axisKey);
         const interiorDistance = (axisValue - boundary) * interiorDirection;
         expect(interiorDistance).toBeGreaterThanOrEqual(-interiorTolerance);
@@ -397,7 +413,7 @@ describe("TransvoxelExtractor", () => {
       cellSize: 1,
     });
 
-    expect(mesh.vertices.length).toBeGreaterThan(0);
+    expect(vertexCount(mesh)).toBeGreaterThan(0);
     expectVerticesNearSurface(mesh, (position) => signedDistance(position.x, position.y, position.z), 0.75);
   });
 
@@ -420,16 +436,16 @@ describe("TransvoxelExtractor", () => {
       cellSize: 1,
     });
 
-    const baseBounds = computeMeshBounds(base.vertices);
-    const translatedBounds = computeMeshBounds(translated.vertices);
+    const baseBounds = computeMeshBounds(base);
+    const translatedBounds = computeMeshBounds(translated);
     const translationComponents: AxisBounds = {
       x: translation.x,
       y: translation.y,
       z: translation.z,
     };
 
-    expect(base.vertices.length).toBeGreaterThan(0);
-    expect(translated.vertices.length).toBeGreaterThan(0);
+    expect(vertexCount(base)).toBeGreaterThan(0);
+    expect(vertexCount(translated)).toBeGreaterThan(0);
 
     (Object.keys(baseBounds.min) as (keyof AxisBounds)[]).forEach((axis) => {
       expect(Math.abs(translatedBounds.min[axis] - (baseBounds.min[axis] + translationComponents[axis]))).toBeLessThan(0.01);
@@ -454,11 +470,11 @@ describe("TransvoxelExtractor", () => {
       cellSize: 1,
     });
 
-    const baseBounds = computeMeshBounds(base.vertices);
-    const neighborBounds = computeMeshBounds(neighbor.vertices);
+    const baseBounds = computeMeshBounds(base);
+    const neighborBounds = computeMeshBounds(neighbor);
 
-    expect(base.vertices.length).toBeGreaterThan(0);
-    expect(neighbor.vertices.length).toBeGreaterThan(0);
+    expect(vertexCount(base)).toBeGreaterThan(0);
+    expect(vertexCount(neighbor)).toBeGreaterThan(0);
     expect(Math.abs(neighborBounds.min.x - (baseBounds.min.x + chunkSize))).toBeLessThan(0.01);
     expect(Math.abs(neighborBounds.max.x - (baseBounds.max.x + chunkSize))).toBeLessThan(0.01);
   });
@@ -479,8 +495,8 @@ describe("TransvoxelExtractor", () => {
       cellSize: 2,
     });
 
-    const unitBounds = computeMeshBounds(unitMesh.vertices);
-    const scaledBounds = computeMeshBounds(scaledMesh.vertices);
+    const unitBounds = computeMeshBounds(unitMesh);
+    const scaledBounds = computeMeshBounds(scaledMesh);
     expect(scaledBounds.min.x).toBeCloseTo(unitBounds.min.x * 2, 5);
     expect(scaledBounds.max.x).toBeCloseTo(unitBounds.max.x * 2, 5);
     expect(scaledBounds.min.y).toBeCloseTo(unitBounds.min.y * 2, 5);
@@ -491,17 +507,29 @@ describe("TransvoxelExtractor", () => {
 
   it("marks translated boundary cells as near", () => {
     const planeField: DensityFunction = (x, _y, _z) => Math.floor((x - 17) * 16);
-    const mesher = new TransvoxelMesher();
-    const mesh = mesher.extractRegularBlock(planeField, {
-      origin: createVector3i(16, 0, 0),
-      lodIndex: 0,
-      cellSize: 1,
-    });
+    const origin = createVector3i(16, 0, 0);
+    const lodIndex = 0;
+    const cellSize = 1;
+    const blockOffset = createVector3f(origin.x * cellSize, origin.y * cellSize, origin.z * cellSize);
+    const cache = new RegularCache(TransvoxelExtractor.BlockWidth);
+    const verts: TransvoxelVertex[] = [];
+    const indices: number[] = [];
 
-    expect(mesh.vertices.length).toBeGreaterThan(0);
-    const hasSecondary = mesh.vertices.some(
-      (vertex) => vertex.near !== 0 && vertex.secondary !== unusedVertexPosition
+    const triangles = TransvoxelExtractor.polygonizeRegularCell(
+      origin,
+      blockOffset,
+      vector3iZero,
+      origin,
+      planeField,
+      lodIndex,
+      cellSize,
+      verts,
+      indices,
+      cache
     );
+
+    expect(triangles).toBeGreaterThan(0);
+    const hasSecondary = verts.some((vertex) => vertex.near !== 0 && vertex.secondary !== unusedVertexPosition);
     expect(hasSecondary).toBe(true);
   });
 
@@ -554,7 +582,7 @@ describe("Reference case tables", () => {
 
     for (let caseCode = 0; caseCode < 256; caseCode++) {
       const mesh = buildRegularCaseMesh(caseCode, regularCache);
-      const actualVertices = mesh.vertices.length;
+      const actualVertices = vertexCount(mesh);
       const actualTriangles = mesh.indices.length / 3;
       const classIndex = Tables.RegularCellClass[caseCode];
       const entry = Tables.RegularCellData[classIndex];
@@ -606,7 +634,7 @@ describe("Reference case tables", () => {
 
     for (let caseCode = 0; caseCode < 512; caseCode++) {
       const mesh = buildTransitionCaseMesh(caseCode, transitionCache);
-      const actualVertices = mesh.vertices.length;
+      const actualVertices = vertexCount(mesh);
       const actualTriangles = mesh.indices.length / 3;
       const rawClass = Tables.TransitionCellClass[caseCode];
       const classIndex = rawClass & 0x7f;

@@ -31,7 +31,7 @@ const mesh = mesher.extractBlock(density, {
 	transitionFaces: faces,
 });
 
-console.log(mesh.vertices.length, mesh.indices.length);
+console.log(mesh.positions.length / 3, mesh.indices.length);
 ```
 
 ### Building the library

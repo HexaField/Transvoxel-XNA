@@ -1,6 +1,5 @@
-import { BufferGeometry, Float32BufferAttribute } from 'three'
+import { BufferAttribute, BufferGeometry, Float32BufferAttribute } from 'three'
 import { MeshData } from '../src/surface-extractor/mesh-data'
-import { getRenderablePosition } from '../src/surface-extractor/vertex'
 import type { DensityFunction } from '../src/volume/volume-data'
 
 export interface BuiltGeometry {
@@ -11,28 +10,11 @@ export interface BuiltGeometry {
 }
 
 export const meshDataToGeometry = (meshData: MeshData): BuiltGeometry => {
-  const vertexCount = meshData.vertices.length
-  const positions = new Float32Array(vertexCount * 3)
-  const normals = new Float32Array(vertexCount * 3)
-
-  meshData.vertices.forEach((vertex, index) => {
-    const base = index * 3
-    const position = getRenderablePosition(vertex)
-    positions[base] = position.x
-    positions[base + 1] = position.y
-    positions[base + 2] = position.z
-
-    normals[base] = vertex.normal.x
-    normals[base + 1] = vertex.normal.y
-    normals[base + 2] = vertex.normal.z
-  })
-
+  const { positions, normals, indices } = meshData
   const geometry = new BufferGeometry()
   geometry.setAttribute('position', new Float32BufferAttribute(positions, 3))
   geometry.setAttribute('normal', new Float32BufferAttribute(normals, 3))
-  geometry.setIndex(meshData.indices)
-
-  const indices = new Uint32Array(meshData.indices)
+  geometry.setIndex(new BufferAttribute(indices, 1))
 
   return { geometry, positions, normals, indices }
 }

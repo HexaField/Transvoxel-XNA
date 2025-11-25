@@ -69,6 +69,24 @@ scene.add(new AmbientLight(0xffffff, 0.4))
 
 const transitionFaces: TransitionFace[] = ['negativeX', 'positiveX', 'negativeY', 'positiveY', 'negativeZ', 'positiveZ']
 
+interface MeshAccumulator {
+  positions: number[]
+  normals: number[]
+  indices: number[]
+}
+
+const createMeshAccumulator = (): MeshAccumulator => ({
+  positions: [],
+  normals: [],
+  indices: []
+})
+
+const finalizeAccumulator = (accumulator: MeshAccumulator): MeshData => ({
+  positions: Float32Array.from(accumulator.positions),
+  normals: Float32Array.from(accumulator.normals),
+  indices: Uint32Array.from(accumulator.indices)
+})
+
 const CELL_SIZE = 1
 const VERTEX_DENSITY_RATIO = 1.5
 const chunkWorldSize = (lodIndex: number): number => CELL_SIZE * (BLOCK_WIDTH << lodIndex)
@@ -206,8 +224,8 @@ function rebuildDemo(): void {
   const blockCenter = blockExtent * 0.5
   currentVolume = createSampleVolume(blockCenter, blockExtent)
 
-  const aggregatedRegular = new MeshData()
-  const aggregatedTransition = new MeshData()
+  const aggregatedRegular = createMeshAccumulator()
+  const aggregatedTransition = createMeshAccumulator()
   const includeTransitions = lodIndex >= 1
 
   for (let gx = 0; gx < settings.gridMultiplier; gx++) {
@@ -231,14 +249,17 @@ function rebuildDemo(): void {
     }
   }
 
+  const regularMeshData = finalizeAccumulator(aggregatedRegular)
+  const transitionMeshData = finalizeAccumulator(aggregatedTransition)
+
   disposeBundles(bundles)
   bundles = []
 
-  if (aggregatedRegular.vertices.length > 0) {
-    bundles.push(createDebugBundle('Regular', aggregatedRegular, 0x5bc7ff))
+  if (regularMeshData.indices.length > 0) {
+    bundles.push(createDebugBundle('Regular', regularMeshData, 0x5bc7ff))
   }
-  if (aggregatedTransition.vertices.length > 0) {
-    bundles.push(createDebugBundle('Transition', aggregatedTransition, 0xffb347))
+  if (transitionMeshData.indices.length > 0) {
+    bundles.push(createDebugBundle('Transition', transitionMeshData, 0xffb347))
   }
 
   bundles.forEach((bundle) => {
@@ -301,7 +322,7 @@ function rebuildDemo(): void {
     console.table(
       bundles.map((bundle) => ({
         mesh: bundle.name,
-        vertices: bundle.meshData.vertices.length,
+        vertices: bundle.meshData.positions.length / 3,
         triangles: bundle.meshData.indices.length / 3,
         inverted: bundle.stats.invertedCount,
         minDot: bundle.stats.minDot.toFixed(3),
@@ -325,10 +346,17 @@ function applyDebugState(): void {
   })
 }
 
-function appendMeshData(target: MeshData, source: MeshData): void {
-  const baseIndex = target.vertices.length
-  source.vertices.forEach((vertex) => target.addVertex(vertex))
-  source.indices.forEach((index) => target.indices.push(baseIndex + index))
+function appendMeshData(target: MeshAccumulator, source: MeshData): void {
+  const baseIndex = target.positions.length / 3
+  for (let i = 0; i < source.positions.length; i++) {
+    target.positions.push(source.positions[i])
+  }
+  for (let i = 0; i < source.normals.length; i++) {
+    target.normals.push(source.normals[i])
+  }
+  for (let i = 0; i < source.indices.length; i++) {
+    target.indices.push(baseIndex + source.indices[i])
+  }
 }
 
 function disposeBundles(bundleList: DebugBundle[]): void {
@@ -381,7 +409,7 @@ function renderDebugPanel(
       const triangles = bundle.meshData.indices.length / 3
       return `<tr>
         <td>${bundle.name}</td>
-        <td>${bundle.meshData.vertices.length}</td>
+        <td>${bundle.meshData.positions.length / 3}</td>
         <td>${triangles}</td>
         <td>${bundle.stats.invertedCount}</td>
         <td>${bundle.stats.minDot.toFixed(3)}</td>
@@ -460,7 +488,7 @@ function renderDebugPanel(
 function downloadReport(bundleList: DebugBundle[]): void {
   const payload = bundleList.reduce<Record<string, unknown>>((acc, bundle) => {
     acc[bundle.name.toLowerCase()] = {
-      vertices: bundle.meshData.vertices.length,
+      vertices: bundle.meshData.positions.length / 3,
       triangles: bundle.meshData.indices.length / 3,
       diagnostics: {
         invertedTriangles: bundle.stats.invertedCount,

@@ -21,7 +21,7 @@ import { matrix3x3FromColumns, multiplyMatrix3x3Vector3i } from '../src/math/mat
 import { fromVector3i as vector3fFromVector3i, vector3fZero } from '../src/math/vector3f'
 import { type Vector3i, addVector3i, createVector3i, multiplyVector3iScalar, vector3iZero } from '../src/math/vector3i'
 import { RegularCache, TransitionCache } from '../src/surface-extractor/cache'
-import { MeshData } from '../src/surface-extractor/mesh-data'
+import { MeshData, buildMeshData } from '../src/surface-extractor/mesh-data'
 import { TransvoxelExtractor } from '../src/surface-extractor/transvoxel-extractor'
 import { TransvoxelVertex } from '../src/surface-extractor/vertex'
 import type { DensityFunction } from '../src/volume/volume-data'
@@ -358,7 +358,7 @@ function getCaseStats(def: CaseDefinition): CaseStats {
 
   const meshData = def.kind === 'regular' ? buildRegularCaseMesh(def.caseCode) : buildTransitionCaseMesh(def.caseCode)
 
-  const actualVertices = meshData.vertices.length
+  const actualVertices = meshData.positions.length / 3
   const actualTriangles = meshData.indices.length / 3
   const matchesExpected = actualVertices === def.expectedVertices && actualTriangles === def.expectedTriangles
 
@@ -388,7 +388,7 @@ function buildRegularCaseMesh(caseCode: number): MeshData {
     indices,
     regularCache
   )
-  return new MeshData(vertices, indices)
+  return buildMeshData(vertices, indices)
 }
 
 function buildTransitionCaseMesh(caseCode: number): MeshData {
@@ -413,7 +413,7 @@ function buildTransitionCaseMesh(caseCode: number): MeshData {
     transitionCache,
     vector3iZero
   )
-  return new MeshData(vertices, indices)
+  return buildMeshData(vertices, indices)
 }
 
 class FacePreview {

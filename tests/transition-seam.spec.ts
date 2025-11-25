@@ -7,10 +7,8 @@ import {
 } from "../src/surface-extractor/transvoxel-extractor";
 import type { DensityFunction } from "../src/volume/volume-data";
 import { type Vector3i, createVector3i, vector3iZero } from "../src/math/vector3i";
-import { getRenderablePosition, unusedVertexPosition } from "../src/surface-extractor/vertex";
 import type { MeshData } from "../src/surface-extractor/mesh-data";
 import type { Vector3f } from "../src/math/vector3f";
-import type { TransvoxelVertex } from "../src/surface-extractor/vertex";
 
 const BLOCK_WIDTH = TransvoxelExtractor.BlockWidth;
 const COARSE_LOD = 1;
@@ -65,7 +63,7 @@ describe("transition seams", () => {
         faces: [face],
       });
 
-      expect(transitionMesh.vertices.length).toBeGreaterThan(0);
+      expect(transitionMesh.positions.length).toBeGreaterThan(0);
 
       const [t0, t1] = tangentialAxes[axis];
       const offsets = [0, fineExtent];
@@ -83,7 +81,7 @@ describe("transition seams", () => {
             cellSize: 1,
           });
 
-          expect(highMesh.vertices.length).toBeGreaterThan(0);
+          expect(highMesh.positions.length).toBeGreaterThan(0);
 
           const tangentialBounds = buildTangentialBounds(axis, highOrigin);
           const transitionEdges = collectSeamEdges(
@@ -214,12 +212,12 @@ function collectSeamEdges(
   tangentialBounds: Bounds
 ): Map<string, number> {
   const edges = new Map<string, number>();
-  const { vertices, indices } = mesh;
+  const { positions, indices } = mesh;
   const epsilon = 1e-3;
   for (let i = 0; i < indices.length; i += 3) {
-    const a = vertices[indices[i]];
-    const b = vertices[indices[i + 1]];
-    const c = vertices[indices[i + 2]];
+    const a = getPosition(positions, indices[i]);
+    const b = getPosition(positions, indices[i + 1]);
+    const c = getPosition(positions, indices[i + 2]);
     processEdge(a, b, edges, axis, seamCoordinate, tangentialBounds, epsilon);
     processEdge(b, c, edges, axis, seamCoordinate, tangentialBounds, epsilon);
     processEdge(c, a, edges, axis, seamCoordinate, tangentialBounds, epsilon);
@@ -227,20 +225,24 @@ function collectSeamEdges(
   return edges;
 }
 
+const getPosition = (positions: Float32Array, index: number): Vector3f => {
+  const base = index * 3;
+  return {
+    x: positions[base],
+    y: positions[base + 1],
+    z: positions[base + 2],
+  } as Vector3f;
+};
+
 function processEdge(
-  startVertex: TransvoxelVertex,
-  endVertex: TransvoxelVertex,
+  start: Vector3f,
+  end: Vector3f,
   edges: Map<string, number>,
   axis: AxisKey,
   seamCoordinate: number,
   tangentialBounds: Bounds,
   epsilon: number
 ): void {
-  if (startVertex.primary === unusedVertexPosition || endVertex.primary === unusedVertexPosition) {
-    return;
-  }
-  const start = getRenderablePosition(startVertex);
-  const end = getRenderablePosition(endVertex);
   if (!isOnSeam(start, axis, seamCoordinate, epsilon)) {
     return;
   }

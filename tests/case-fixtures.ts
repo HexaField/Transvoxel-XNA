@@ -9,7 +9,7 @@ import {
   vector3iZero,
 } from "../src/math/vector3i";
 import { RegularCache, TransitionCache } from "../src/surface-extractor/cache";
-import { MeshData } from "../src/surface-extractor/mesh-data";
+import { MeshData, buildMeshData } from "../src/surface-extractor/mesh-data";
 import { TransvoxelExtractor } from "../src/surface-extractor/transvoxel-extractor";
 import { TransvoxelVertex } from "../src/surface-extractor/vertex";
 import type { DensityFunction } from "../src/volume/volume-data";
@@ -120,7 +120,7 @@ export function buildRegularCaseMesh(caseCode: number, cache: RegularCache): Mes
     indices,
     cache
   );
-  return new MeshData(vertices, indices);
+  return buildMeshData(vertices, indices);
 }
 
 export function buildTransitionCaseMesh(caseCode: number, cache: TransitionCache): MeshData {
@@ -145,7 +145,7 @@ export function buildTransitionCaseMesh(caseCode: number, cache: TransitionCache
     cache,
     vector3iZero
   );
-  return new MeshData(vertices, indices);
+  return buildMeshData(vertices, indices);
 }
 
 function buildTransitionPositions(
