@@ -6,7 +6,6 @@ export type ChunkFieldRequest = {
   chunkX: number
   chunkY: number
   chunkZ: number
-  originY: number
   requestId: number
   generatorId: DensityGeneratorId
   generatorToken: number

@@ -78,8 +78,6 @@ scene.add(new AxesHelper(10))
 
 const BLOCK_WIDTH = TransvoxelExtractor.BlockWidth
 const CELL_SIZE = 1
-const WORLD_MIN_Y = -64
-const WORLD_MAX_Y = 128
 const VERTEX_DENSITY_RATIO = 1.5
 const DENSITY_SAMPLE_STRIDE_BASE = 2
 
@@ -230,9 +228,7 @@ const createChunkScheduler = (): OctreeChunkManager =>
   new OctreeChunkManager({
     blockWidth: BLOCK_WIDTH,
     cellSize: CELL_SIZE,
-    lodLevels: LOD_LEVELS,
-    worldMinY: WORLD_MIN_Y,
-    worldMaxY: WORLD_MAX_Y
+    lodLevels: LOD_LEVELS
   })
 
 type ChunkWorkerRequest = ChunkFieldRequest
@@ -247,7 +243,6 @@ interface ChunkRecord {
   chunkY: number
   chunkZ: number
   color: number
-  originY: number
   generatorId: DensityGeneratorId
   descriptor: ChunkDescriptor
   densityMesh?: InstancedMesh
@@ -438,7 +433,6 @@ function dispatchBuilds(): void {
       chunkX: request.descriptor.chunkX,
       chunkY: request.descriptor.chunkY,
       chunkZ: request.descriptor.chunkZ,
-      originY: request.descriptor.originY,
       requestId: request.requestId,
       generatorId: request.generatorId,
       generatorToken: request.generatorToken
@@ -509,9 +503,10 @@ function buildChunkRecord(
 ): ChunkRecord | null {
   const cellScale = 1 << descriptor.lodIndex
   const samplesPerAxis = BLOCK_WIDTH * cellScale
+  const originY = descriptor.chunkY * samplesPerAxis
   const origin = createVector3i(
     descriptor.chunkX * samplesPerAxis,
-    descriptor.originY,
+    originY,
     descriptor.chunkZ * samplesPerAxis
   )
 
@@ -548,7 +543,6 @@ function buildChunkRecord(
     chunkY: descriptor.chunkY,
     chunkZ: descriptor.chunkZ,
     color: descriptor.color,
-    originY: descriptor.originY,
     generatorId,
     descriptor
   }
@@ -730,7 +724,7 @@ const buildDensityVisualizationMesh = (descriptor: ChunkDescriptor, sampler: Den
   const samplesPerAxis = BLOCK_WIDTH * cellScale
   const stride = Math.max(DENSITY_SAMPLE_STRIDE_BASE, cellScale)
   const originX = descriptor.chunkX * samplesPerAxis
-  const originY = descriptor.originY
+  const originY = descriptor.chunkY * samplesPerAxis
   const originZ = descriptor.chunkZ * samplesPerAxis
   const samples: Array<{ x: number; y: number; z: number; density: number }> = []
   for (let z = 0; z <= samplesPerAxis; z += stride) {
@@ -851,14 +845,13 @@ function createChunkWorker(): Worker {
     const FLOATING_SPHERE_SWAY_FREQUENCY = ${FLOATING_SPHERE_SWAY_FREQUENCY};
 
     self.onmessage = (event) => {
-      const { key, lodIndex, chunkX, chunkY, chunkZ, originY, requestId, generatorId, generatorToken } = event.data;
+      const { key, lodIndex, chunkX, chunkY, chunkZ, requestId, generatorId, generatorToken } = event.data;
       const range = BLOCK_WIDTH << lodIndex;
       const transitionReach = lodIndex === 0 ? 1 : ((1 << (lodIndex - 1)) * 2 + 1);
       const padding = Math.max(1, transitionReach);
       const sampleSize = range + padding * 2 + 1;
       const minX = chunkX * range - padding;
-      const baseOriginY = originY ?? chunkY * range;
-      const minY = baseOriginY - padding;
+      const minY = chunkY * range - padding;
       const minZ = chunkZ * range - padding;
       const totalSamples = sampleSize * sampleSize * sampleSize;
       const data = new Int8Array(totalSamples);

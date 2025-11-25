@@ -18,8 +18,6 @@ export interface OctreeChunkConfig {
   blockWidth: number
   cellSize: number
   lodLevels: LodLevel[]
-  worldMinY: number
-  worldMaxY: number
   lodDistanceMultiplier?: number
 }
 
@@ -31,7 +29,6 @@ export interface ChunkDescriptor {
   key: string
   color: number
   transitionFaces: TransitionFace[]
-  originY: number
 }
 
 export interface ChunkRequest {
@@ -80,10 +77,6 @@ export class OctreeChunkManager {
   private readonly lodLookup: Map<number, DerivedLodLevel>
   private readonly derivedLodLevels: DerivedLodLevel[]
   private readonly lodDistanceMultiplier: number
-  private readonly worldMinY: number
-  private readonly worldMaxY: number
-  private readonly coarseMinChunkY: number
-  private readonly coarseMaxChunkY: number
   private lastCameraPosition: Vector3Like | null = null
   private desiredChunkKeys = new Set<string>()
   private nextRequestId = 1
@@ -97,11 +90,6 @@ export class OctreeChunkManager {
     if (config.lodLevels.length === 0) {
       throw new Error('At least one LOD level is required')
     }
-    if (config.worldMaxY <= config.worldMinY) {
-      throw new RangeError('worldMaxY must be greater than worldMinY')
-    }
-    this.worldMinY = config.worldMinY
-    this.worldMaxY = config.worldMaxY
     this.lodDistanceMultiplier = config.lodDistanceMultiplier ?? 1.5
     this.derivedLodLevels = config.lodLevels
       .map((level) => ({
@@ -111,9 +99,6 @@ export class OctreeChunkManager {
       .sort((a, b) => a.lodIndex - b.lodIndex)
     this.maxLodIndex = this.derivedLodLevels[this.derivedLodLevels.length - 1].lodIndex
     this.lodLookup = new Map(this.derivedLodLevels.map((level) => [level.lodIndex, level]))
-    const coarseSize = this.chunkWorldSize(this.maxLodIndex)
-    this.coarseMinChunkY = Math.floor(this.worldMinY / coarseSize)
-    this.coarseMaxChunkY = Math.floor((this.worldMaxY - 1) / coarseSize)
   }
 
   update(cameraPosition: Vector3Like): ChunkPlan {
@@ -232,9 +217,6 @@ export class OctreeChunkManager {
 
     while (queue.length) {
       const node = queue.pop()!
-      if (!this.isNodeWithinWorld(node)) {
-        continue
-      }
       const level = this.lodLookup.get(node.lodIndex)
       if (!level) {
         continue
@@ -387,23 +369,36 @@ export class OctreeChunkManager {
     const farthest = this.derivedLodLevels[this.derivedLodLevels.length - 1]
     const radiusChunks = Math.ceil(farthest.maxDistance / coarseSize) + 2
     const baseX = Math.floor(cameraPosition.x / coarseSize)
+    const baseY = Math.floor(cameraPosition.y / coarseSize)
     const baseZ = Math.floor(cameraPosition.z / coarseSize)
     const horizontalOrder = this.generateSpiralOrder(baseX, baseZ, radiusChunks)
     const hasOrigin = horizontalOrder.some((coords) => coords.chunkX === 0 && coords.chunkZ === 0)
     if (!hasOrigin) {
       horizontalOrder.push({ chunkX: 0, chunkZ: 0 })
     }
+    const verticalMin = baseY - radiusChunks
+    const verticalMax = baseY + radiusChunks
+    const includesOriginY = verticalMin <= 0 && verticalMax >= 0
     const nodes: OctreeNode[] = []
     for (const coords of horizontalOrder) {
-      const isCenter = coords.chunkX === baseX && coords.chunkZ === baseZ
-      const isOrigin = coords.chunkX === 0 && coords.chunkZ === 0
-      for (let chunkY = this.coarseMinChunkY; chunkY <= this.coarseMaxChunkY; chunkY++) {
+      const isCenterColumn = coords.chunkX === baseX && coords.chunkZ === baseZ
+      const isOriginColumn = coords.chunkX === 0 && coords.chunkZ === 0
+      for (let chunkY = verticalMin; chunkY <= verticalMax; chunkY++) {
         nodes.push({
           lodIndex: this.maxLodIndex,
           chunkX: coords.chunkX,
           chunkY,
           chunkZ: coords.chunkZ,
-          forceInclude: isCenter || isOrigin
+          forceInclude: isCenterColumn && chunkY === baseY
+        })
+      }
+      if (!includesOriginY && isOriginColumn) {
+        nodes.push({
+          lodIndex: this.maxLodIndex,
+          chunkX: coords.chunkX,
+          chunkY: 0,
+          chunkZ: coords.chunkZ,
+          forceInclude: true
         })
       }
     }
@@ -475,9 +470,7 @@ export class OctreeChunkManager {
             chunkY: baseY + dy,
             chunkZ: baseZ + dz
           }
-          if (this.isNodeWithinWorld(child)) {
-            children.push(child)
-          }
+          children.push(child)
         }
       }
     }
@@ -509,8 +502,7 @@ export class OctreeChunkManager {
       chunkZ: descriptor.chunkZ,
       key: descriptor.key,
       color: descriptor.color,
-      transitionFaces: [...descriptor.transitionFaces],
-      originY: descriptor.originY
+      transitionFaces: [...descriptor.transitionFaces]
     }
     this.pendingRequests.set(descriptor.key, { descriptor: clone, requestId })
     plan.requests.push({ descriptor: clone, requestId })
@@ -818,7 +810,7 @@ export class OctreeChunkManager {
     const scale = this.config.blockWidth << descriptor.lodIndex
     const minX = descriptor.chunkX * scale
     const minZ = descriptor.chunkZ * scale
-    const minY = descriptor.originY
+    const minY = descriptor.chunkY * scale
     return {
       minX,
       maxX: minX + scale,
@@ -858,8 +850,7 @@ export class OctreeChunkManager {
       chunkZ: node.chunkZ,
       key: this.chunkKey(node.lodIndex, node.chunkX, node.chunkY, node.chunkZ),
       color: level.color,
-      transitionFaces: [],
-      originY: node.chunkY * samplesPerAxis
+      transitionFaces: []
     }
   }
 
@@ -904,13 +895,6 @@ export class OctreeChunkManager {
     }
     this.retainedParents.clear()
     this.pendingMergeParents.clear()
-  }
-
-  private isNodeWithinWorld(node: OctreeNode): boolean {
-    const size = this.chunkWorldSize(node.lodIndex)
-    const minY = node.chunkY * size
-    const maxY = minY + size
-    return maxY > this.worldMinY && minY < this.worldMaxY
   }
 
   private createPlan(): ChunkPlan {

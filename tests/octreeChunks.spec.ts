@@ -37,8 +37,6 @@ const createManager = (
     blockWidth: overrides.blockWidth ?? 4,
     cellSize: overrides.cellSize ?? 1,
     lodLevels: overrides.lodLevels ?? DEFAULT_LODS,
-    worldMinY: overrides.worldMinY ?? -64,
-    worldMaxY: overrides.worldMaxY ?? 64,
     lodDistanceMultiplier: overrides.lodDistanceMultiplier ?? 1.5,
   };
   return new OctreeChunkManager(config);
@@ -82,7 +80,6 @@ const descriptorFor = (
   chunkZ: number,
   color = 0
 ): ChunkDescriptor => {
-  const samplesPerAxis = blockWidth << lodIndex;
   return {
     lodIndex,
     chunkX,
@@ -91,7 +88,6 @@ const descriptorFor = (
     key: `${lodIndex}:${chunkX}:${chunkY}:${chunkZ}`,
     color,
     transitionFaces: [],
-    originY: chunkY * samplesPerAxis,
   };
 };
 
@@ -146,16 +142,17 @@ describe("OctreeChunkManager", () => {
     expect(hasFinest).toBe(true);
   });
 
-  it("covers the entire vertical range at the coarsest LOD", () => {
+  it("requests multiple vertical layers at the coarsest LOD", () => {
     const blockWidth = 8;
-    const worldMinY = -32;
-    const worldMaxY = 40;
-    const manager = createManager({ blockWidth, worldMinY, worldMaxY });
+    const manager = createManager({ blockWidth });
     const plan = manager.update({ x: 0, y: 0, z: 0 });
-    const coarseKeys = plan.requests
+    const coarseYs = plan.requests
       .filter((request: ChunkRequest) => request.descriptor.lodIndex === 1)
       .map((request: ChunkRequest) => request.descriptor.chunkY);
-    expect(new Set(coarseKeys).size).toBeGreaterThan(1);
+    expect(coarseYs.length).toBeGreaterThan(1);
+    const minY = Math.min(...coarseYs);
+    const maxY = Math.max(...coarseYs);
+    expect(maxY - minY).toBeGreaterThan(0);
   });
 
   it("splits an active parent chunk and releases it after children finish", () => {
@@ -163,8 +160,6 @@ describe("OctreeChunkManager", () => {
     const manager = createManager({
       blockWidth,
       lodLevels: SPLIT_LODS,
-      worldMinY: 0,
-      worldMaxY: 4,
     });
     const chunkSize = blockWidth << 1;
     const farCamera = { x: chunkSize * 2, y: 2, z: chunkSize * 2 };
@@ -204,8 +199,6 @@ describe("OctreeChunkManager", () => {
     const manager = createManager({
       blockWidth,
       lodLevels: SPLIT_LODS,
-      worldMinY: 0,
-      worldMaxY: 4,
     });
     const chunkSize = blockWidth << 1;
     const farCamera = { x: chunkSize * 4, y: 3, z: chunkSize * 4 };
@@ -248,8 +241,6 @@ describe("OctreeChunkManager", () => {
     const manager = createManager({
       blockWidth,
       lodLevels: TRANSITION_TEST_LODS,
-      worldMinY: 0,
-      worldMaxY: blockWidth << 1,
     });
     const desired = new Map<string, ChunkDescriptor>();
     const coarse = descriptorFor(blockWidth, 1, 0, 0, 0, 0x00ff00);
@@ -271,8 +262,6 @@ describe("OctreeChunkManager", () => {
     const manager = createManager({
       blockWidth,
       lodLevels: TRANSITION_TEST_LODS,
-      worldMinY: 0,
-      worldMaxY: blockWidth << 1,
     });
     const desired = new Map<string, ChunkDescriptor>();
     const coarse = descriptorFor(blockWidth, 1, 0, 0, 0, 0x00ff00);
@@ -294,8 +283,6 @@ describe("OctreeChunkManager", () => {
     const manager = createManager({
       blockWidth,
       lodLevels: TRANSITION_TEST_LODS,
-      worldMinY: 0,
-      worldMaxY: blockWidth << 1,
     });
     const desired = new Map<string, ChunkDescriptor>();
     const coarse = descriptorFor(blockWidth, 1, 0, 0, 0, 0x00ff00);
@@ -314,8 +301,6 @@ describe("OctreeChunkManager", () => {
     const manager = createManager({
       blockWidth,
       lodLevels: TRANSITION_TEST_LODS,
-      worldMinY: 0,
-      worldMaxY: blockWidth << 1,
     });
 
     const desired = new Map<string, ChunkDescriptor>();

@@ -186,8 +186,7 @@ export class WebGPUChunkGenerator {
     const padding = Math.max(1, transitionReach)
     const sampleSize = range + padding * 2 + 1
     const minX = request.chunkX * range - padding
-    const chunkOriginY = request.originY ?? request.chunkY * range
-    const minY = chunkOriginY - padding
+    const minY = request.chunkY * range - padding
     const minZ = request.chunkZ * range - padding
     const totalSamples = sampleSize * sampleSize * sampleSize
     return { minX, minY, minZ, sampleSize, totalSamples }
