@@ -30,3 +30,10 @@ _ReSharper*/
 .vs/
 #Nuget packages folder
 packages/
+
+
+dist/
+demo/dist/
+node_modules/
+package-lock.json
+*.pdf

@@ -1,0 +1,426 @@
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    'Inter',
+    'Segoe UI',
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+  background: radial-gradient(circle at top, #0b1024, #03040a 65%);
+  color: #f4f6ff;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+#app {
+  width: 100vw;
+  height: 100vh;
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.overlay {
+  position: fixed;
+  top: 1.5rem;
+  left: 1.5rem;
+  padding: 1rem 1.25rem;
+  border-radius: 0.85rem;
+  background: rgba(3, 5, 12, 0.7);
+  border: 1px solid rgba(122, 142, 255, 0.25);
+  box-shadow: 0 10px 35px rgba(3, 5, 12, 0.45);
+  backdrop-filter: blur(18px);
+  max-width: 20rem;
+}
+
+.overlay h1 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #9fb6ff;
+}
+
+.overlay p {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  color: #d5dcff;
+}
+
+.overlay p + p {
+  margin-top: 0.5rem;
+}
+
+.generator-panel {
+  margin-top: 0.85rem;
+}
+
+.generator-heading {
+  margin: 0 0 0.4rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #9fb6ff;
+}
+
+.generator-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.generator-button {
+  flex: 1 1 45%;
+  border: 1px solid rgba(122, 142, 255, 0.4);
+  border-radius: 0.45rem;
+  background: rgba(122, 142, 255, 0.1);
+  color: #e5e9ff;
+  font-size: 0.8rem;
+  padding: 0.35rem 0.45rem;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.generator-button:hover {
+  background: rgba(122, 142, 255, 0.2);
+}
+
+.generator-button.is-active {
+  border-color: #7ad9ff;
+  background: rgba(122, 142, 255, 0.3);
+  color: #ffffff;
+}
+
+.density-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  color: #e1e6ff;
+  cursor: pointer;
+}
+
+.density-toggle input {
+  accent-color: #7ad9ff;
+}
+
+.overlay-links a {
+  color: #7ad9ff;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.overlay-links a:hover {
+  text-decoration: underline;
+}
+
+.overlay code {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  background: rgba(159, 182, 255, 0.18);
+  border-radius: 0.4rem;
+  padding: 0 0.35rem;
+  font-size: 0.85rem;
+  color: #ffffff;
+}
+
+.debug-panel {
+  position: fixed;
+  top: 1.5rem;
+  right: 1.5rem;
+  width: min(22rem, 90vw);
+  padding: 1rem 1.25rem;
+  border-radius: 0.85rem;
+  background: rgba(3, 5, 12, 0.78);
+  border: 1px solid rgba(122, 142, 255, 0.25);
+  box-shadow: 0 10px 35px rgba(3, 5, 12, 0.45);
+  backdrop-filter: blur(18px);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  overflow-y: auto;
+  max-height: calc(100vh - 3rem);
+}
+
+.debug-panel h2 {
+  margin: 0 0 0.55rem;
+  font-size: 0.95rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #9fb6ff;
+}
+
+.debug-panel section {
+  margin-bottom: 0.9rem;
+}
+
+.debug-panel table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.debug-panel th,
+.debug-panel td {
+  text-align: left;
+  padding: 0.2rem 0.1rem;
+}
+
+.debug-panel th {
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  color: #7f9bff;
+}
+
+.debug-panel td {
+  color: #eff1ff;
+}
+
+.debug-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.debug-controls label {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+
+.debug-controls input[type='checkbox'] {
+  accent-color: #7ad9ff;
+}
+
+.debug-panel button {
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid rgba(122, 142, 255, 0.5);
+  border-radius: 0.5rem;
+  background: rgba(122, 142, 255, 0.12);
+  color: #e5e9ff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.debug-panel button:hover {
+  background: rgba(122, 142, 255, 0.2);
+}
+
+body.case-page {
+  overflow-y: auto;
+  padding: 1.5rem clamp(1rem, 3vw, 2.25rem);
+  background: linear-gradient(135deg, #04060f 0%, #050917 45%, #04060f 100%);
+}
+
+.case-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1.5rem;
+  color: #e8ecff;
+  margin-bottom: 1.5rem;
+}
+
+.case-header h1 {
+  margin: 0 0 0.35rem;
+  font-size: clamp(1.5rem, 2.2vw, 2.25rem);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #a9bbff;
+}
+
+.case-header p {
+  margin: 0;
+  max-width: 60ch;
+  color: #cfd6ff;
+  line-height: 1.5;
+}
+
+.case-header a {
+  color: #7ad9ff;
+  text-decoration: none;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.case-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+}
+
+.case-section {
+  background: rgba(8, 12, 26, 0.9);
+  border: 1px solid rgba(122, 142, 255, 0.18);
+  border-radius: 1rem;
+  padding: 1.1rem;
+  box-shadow: 0 14px 40px rgba(3, 5, 12, 0.45);
+}
+
+.case-section-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.case-section-header h2 {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #9fb6ff;
+  font-size: 1rem;
+}
+
+.case-section-header span {
+  font-size: 0.85rem;
+  color: #c3ccff;
+}
+
+.case-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1rem;
+}
+
+.case-card {
+  background: rgba(5, 8, 18, 0.95);
+  border: 1px solid rgba(122, 142, 255, 0.2);
+  border-radius: 0.9rem;
+  padding: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.case-card h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+  color: #dbe1ff;
+}
+
+.case-meta {
+  font-size: 0.78rem;
+  color: #9fa8d6;
+  line-height: 1.4;
+}
+
+.status-pill {
+  align-self: flex-start;
+  padding: 0.1rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+}
+
+.status-pass {
+  background: rgba(74, 222, 128, 0.12);
+  border-color: rgba(74, 222, 128, 0.4);
+  color: #78f4ac;
+}
+
+.status-fail {
+  background: rgba(255, 105, 97, 0.12);
+  border-color: rgba(255, 105, 97, 0.4);
+  color: #ffb4b0;
+}
+
+.case-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.case-stats dt {
+  margin: 0;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #8297ff;
+}
+
+.case-stats dd {
+  margin: 0.1rem 0 0;
+  font-size: 0.95rem;
+  color: #f4f6ff;
+}
+
+.case-preview {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 0.7rem;
+  overflow: hidden;
+  border: 1px solid rgba(122, 142, 255, 0.15);
+  background: radial-gradient(circle at top, rgba(12, 16, 32, 0.9), rgba(3, 4, 10, 0.95));
+}
+
+.case-debug-controls {
+  margin-top: 0.35rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  color: #9fa8d6;
+}
+
+.case-debug-controls label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+}
+
+.case-debug-controls input[type='checkbox'] {
+  accent-color: #7ad9ff;
+}
+
+.case-debug-note {
+  margin-left: 1.4rem;
+  font-size: 0.7rem;
+  color: #7f86ad;
+}
+
+.case-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.case-actions button {
+  flex: 1 1 140px;
+  border: 1px solid rgba(122, 142, 255, 0.4);
+  border-radius: 0.5rem;
+  background: rgba(122, 142, 255, 0.12);
+  color: #e5e9ff;
+  font-weight: 600;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+}
+
+.case-actions button:hover {
+  background: rgba(122, 142, 255, 0.2);
+}

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Transvoxel · Procedural Terrain</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <div class="overlay" aria-live="polite">
+      <h1>Procedural Terrain</h1>
+      <p>
+        Multiple chunks with mixed LODs stream in around the camera. Drag to orbit, scroll to zoom, and pan with right
+        mouse or touch.
+      </p>
+      <p id="chunk-stats">Estimating chunks…</p>
+      <div class="generator-panel" aria-live="polite">
+        <p class="generator-heading">Density Field: <span id="generator-status">Procedural Terrain</span></p>
+        <div
+          id="generator-controls"
+          class="generator-controls"
+          role="group"
+          aria-label="Select density generator"
+        ></div>
+        <label class="density-toggle">
+          <input type="checkbox" id="toggle-density" />
+          <span>Show density field</span>
+        </label>
+      </div>
+      <p class="overlay-links">
+        <a href="./index.html">← Back to chunk inspector</a>
+      </p>
+    </div>
+    <script type="module" src="/terrain.ts"></script>
+  </body>
+</html>
